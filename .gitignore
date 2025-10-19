@@ -1,0 +1,20 @@
+# Node
+node_modules/
+*/node_modules/
+
+# Expo
+.expo/
+.expo-shared/
+*.expo/*
+
+# Builds
+*.DS_Store
+dist/
+*.log
+
+# Env
+*.env
+*.env.local
+
+# Vercel
+.vercel/

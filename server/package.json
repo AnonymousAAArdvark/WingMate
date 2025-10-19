@@ -1,0 +1,23 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "tsc",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "openai": "^6.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.8.1",
+    "@vercel/node": "^5.4.0",
+    "typescript": "^5.9.3"
+  }
+}
