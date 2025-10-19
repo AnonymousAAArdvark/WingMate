@@ -18,6 +18,18 @@ type ChatRequestBody = {
   lastMessages?: { from: "user" | "seed"; text: string }[];
   userMessage: string;
   preferDateSetup?: boolean;
+  userProfile?: {
+    name?: string;
+    bio?: string;
+    prompts?: { question: string; answer: string }[];
+    hobbies?: string[];
+  };
+  counterpartProfile?: {
+    name?: string;
+    bio?: string;
+    prompts?: { question: string; answer: string }[];
+    hobbies?: string[];
+  };
 };
 
 const fallbackReply = "That sounds fun—want to pick a time?";
@@ -39,9 +51,30 @@ export default async function handler(
       return;
     }
 
+    const formatProfile = (
+      label: string,
+      p?: ChatRequestBody["userProfile"],
+    ) => {
+      if (!p) return `${label}: (none provided)`;
+      const lines: string[] = [];
+      if (p.name) lines.push(`name: ${p.name}`);
+      if (p.bio) lines.push(`bio: ${p.bio}`);
+      if (p.hobbies?.length) lines.push(`hobbies: ${p.hobbies.join(", ")}`);
+      if (p.prompts?.length) {
+        const ps = p.prompts
+          .slice(0, 4)
+          .map((q) => `${q.question}: ${q.answer}`)
+          .join(" | ");
+        lines.push(`prompts: ${ps}`);
+      }
+      return `${label}: ${lines.join("; ")}`;
+    };
+
     const systemPrompt = [
       `You are ${body.seedName}, role-playing naturally in a dating chat.`,
       `PERSONA: ${body.personaSeed}`,
+      formatProfile("Your profile", body.userProfile),
+      formatProfile("Other person", body.counterpartProfile),
       "GOALS: Be warm and concise (<= 2 short sentences). Ask light questions to keep chat going.",
       "If meeting is hinted or preferDateSetup=true, propose a simple coffee/walk plan with day/time.",
       "STYLE: Casual texting; avoid over-formality or external links.",
