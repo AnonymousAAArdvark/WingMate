@@ -6,8 +6,10 @@ import { mapProfileRow } from "../lib/mappers";
 type ProfileState = {
   profile?: Profile;
   isLoading: boolean;
+  isSaving: boolean;
+  error?: string;
   load: (userId: string) => Promise<void>;
-  save: (profile: Profile) => Promise<void>;
+  save: (profile: Profile) => Promise<Profile>;
   setPro: (userId: string, value: boolean) => Promise<void>;
   reset: () => void;
 };
@@ -15,8 +17,10 @@ type ProfileState = {
 export const useProfile = create<ProfileState>((set) => ({
   profile: undefined,
   isLoading: false,
+  isSaving: false,
+  error: undefined,
   load: async (userId) => {
-    set({ isLoading: true });
+    set({ isLoading: true, error: undefined });
     try {
       const { data, error } = await supabase
         .from("profiles")
@@ -48,29 +52,55 @@ export const useProfile = create<ProfileState>((set) => ({
       is_pro: profile.isPro,
     };
 
-    const { error } = await supabase.from("profiles").upsert(payload);
-    if (error) {
+    set({ isSaving: true, error: undefined });
+    try {
+      const { data, error } = await supabase
+        .from("profiles")
+        .upsert(payload)
+        .select(
+          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
+        )
+        .maybeSingle();
+
+      if (error) {
+        throw error;
+      }
+
+      const next = data ? mapProfileRow(data) : profile;
+      set({ profile: next });
+      return next;
+    } catch (error: any) {
+      set({ error: error?.message ?? "Failed to save profile." });
       throw error;
+    } finally {
+      set({ isSaving: false });
     }
-    set({ profile });
   },
   setPro: async (userId, value) => {
-    const { error, data } = await supabase
-      .from("profiles")
-      .update({ is_pro: value })
-      .eq("id", userId)
-      .select(
-        "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
-      )
-      .maybeSingle();
+    set({ isSaving: true, error: undefined });
+    try {
+      const { data, error } = await supabase
+        .from("profiles")
+        .update({ is_pro: value })
+        .eq("id", userId)
+        .select(
+          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
+        )
+        .maybeSingle();
 
-    if (error) {
+      if (error) {
+        throw error;
+      }
+
+      set((state) => ({
+        profile: data ? mapProfileRow(data) : state.profile,
+      }));
+    } catch (error: any) {
+      set({ error: error?.message ?? "Failed to update plan." });
       throw error;
+    } finally {
+      set({ isSaving: false });
     }
-
-    set((state) => ({
-      profile: data ? mapProfileRow(data) : state.profile,
-    }));
   },
-  reset: () => set({ profile: undefined }),
+  reset: () => set({ profile: undefined, error: undefined, isSaving: false }),
 }));

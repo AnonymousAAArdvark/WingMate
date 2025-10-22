@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { Redirect, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { Redirect, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import ChatBubble from "../../src/components/ChatBubble";
 import { fetchAutopilotDraft } from "../../src/lib/api";
 import { mapProfileRow, mapSeedProfile } from "../../src/lib/mappers";
@@ -22,11 +22,31 @@ import { useMatches } from "../../src/store/useMatches";
 import { useProfile } from "../../src/store/useProfile";
 import { supabase } from "../../src/lib/supabase";
 
+function TypingDots() {
+  const [dots, setDots] = useState(1);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDots((prev) => (prev % 3) + 1);
+    }, 500);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <View style={styles.dotsContainer}>
+      <View style={[styles.dot, dots >= 1 && styles.dotActive]} />
+      <View style={[styles.dot, dots >= 2 && styles.dotActive]} />
+      <View style={[styles.dot, dots >= 3 && styles.dotActive]} />
+    </View>
+  );
+}
+
 export default function ChatScreen() {
   const { matchId } = useLocalSearchParams<{ matchId: string }>();
   const insets = useSafeAreaInsets();
   if (!matchId) return <Redirect href="/(tabs)/matches" />;
 
+  const router = useRouter();
   const user = useAuth((s) => s.user);
   const session = useAuth((s) => s.session);
   const loadMatches = useMatches((s) => s.load);
@@ -42,10 +62,10 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
 
   // Drafting/typing state
-  const [isSelfAIDrafting, setIsSelfAIDrafting] = useState(false);   // lock UI only when my AI drafts
+  const [isSelfAIDrafting, setIsSelfAIDrafting] = useState(false);
   const [isPartnerAIDrafting, setIsPartnerAIDrafting] = useState(false);
-  const [isTypingPartner, setIsTypingPartner] = useState(false);     // partner typing indicator (manual or AI)
-  const [isDraftingOpener, setIsDraftingOpener] = useState(false);   // local opener button state
+  const [isTypingPartner, setIsTypingPartner] = useState(false);
+  const [isDraftingOpener, setIsDraftingOpener] = useState(false);
 
   const match = useMemo(() => matches.find((m) => m.id === matchId), [matches, matchId]);
   const messages = messagesMap[matchId] ?? [];
@@ -58,8 +78,24 @@ export default function ChatScreen() {
 
   const [partner, setPartner] = useState<any>(null);
   const autoPilotActive = (profile?.isPro ?? false) && (match?.autopilot ?? true);
+  const [composerHeight, setComposerHeight] = useState(0);
 
-  // ===== load matches and my profile =====
+  const profileRoute = useMemo(() => {
+    if (!match) return null;
+    if (match.seedId) {
+      return match.seedId ? { kind: "seed" as const, id: match.seedId } : null;
+    }
+    return partnerUserId ? { kind: "user" as const, id: partnerUserId } : null;
+  }, [match, partnerUserId]);
+
+  const handleViewProfile = useCallback(() => {
+    if (!profileRoute) return;
+    router.push({
+      pathname: "/profile/[profileId]",
+      params: { profileId: profileRoute.id, kind: profileRoute.kind },
+    });
+  }, [profileRoute, router]);
+
   useFocusEffect(
     useCallback(() => {
       if (user?.id) {
@@ -74,7 +110,6 @@ export default function ChatScreen() {
     loadMessages(matchId);
   }, [loadMessages, matchId, user?.id]);
 
-  // ===== partner profile load =====
   useEffect(() => {
     if (!match) return;
     let cancelled = false;
@@ -112,21 +147,18 @@ export default function ChatScreen() {
     };
   }, [match, user?.id]);
 
-  // ===== realtime typing events (topic MUST match Edge) =====
   useEffect(() => {
     if (!matchId || !user?.id) return;
 
     const channel = supabase
-      .channel(`match:${matchId}`) // ✅ MUST match the Edge broadcast topic exactly
+      .channel(`match:${matchId}`)
       .on("broadcast", { event: "autopilot_drafting" }, (payload: any) => {
         const fromId = payload?.payload?.sender_id;
         if (!fromId) return;
 
         if (fromId === user.id) {
-          // My autopilot drafting → lock UI and show my typing bubble (right side)
           setIsSelfAIDrafting(true);
         } else {
-          // Partner autopilot drafting → show partner typing (left), do NOT lock UI
           setIsPartnerAIDrafting(true);
           setIsTypingPartner(true);
         }
@@ -155,13 +187,11 @@ export default function ChatScreen() {
           const senderId = newMsg.sender_id;
           loadMessages(matchId);
 
-          // Partner message arrived (manual or AI) → clear partner indicators
           if ((partnerUserId && senderId === partnerUserId) || (!partnerUserId && newMsg.is_seed)) {
             setIsTypingPartner(false);
             setIsPartnerAIDrafting(false);
           }
 
-          // My (autopilot) message arrived → unlock my UI
           if (senderId === user.id) {
             setIsSelfAIDrafting(false);
           }
@@ -174,7 +204,6 @@ export default function ChatScreen() {
     };
   }, [matchId, user?.id, partnerUserId, loadMessages]);
 
-  // ===== handlers =====
   const handleSend = async () => {
     if (!user || !messageText.trim() || isSelfAIDrafting) return;
     setSending(true);
@@ -190,7 +219,7 @@ export default function ChatScreen() {
   const runAutopilotOpener = useCallback(async () => {
     if (!user || isSelfAIDrafting || !session?.access_token) return;
 
-    setIsSelfAIDrafting(true);   // lock UI immediately for my opener
+    setIsSelfAIDrafting(true);
     setIsDraftingOpener(true);
 
     try {
@@ -230,21 +259,20 @@ export default function ChatScreen() {
     } catch {
       await sendMessage(user.id, matchId, "Hey! Want to grab a quick coffee?");
     } finally {
-      setIsSelfAIDrafting(false); // local unlock (edge doesn’t broadcast for opener)
+      setIsSelfAIDrafting(false);
       setIsDraftingOpener(false);
     }
   }, [user, session?.access_token, matchId, profile, partner, sendMessage, messagesMap]);
 
-  // ===== UI rules =====
-  const disableAll = isSelfAIDrafting;     // Only my AI drafting locks UI
+  const disableAll = isSelfAIDrafting;
   const showPartnerTyping = isTypingPartner || isPartnerAIDrafting;
-  const showSelfTyping = isSelfAIDrafting; // right-side indicator
+  const showSelfTyping = isSelfAIDrafting;
 
   if (!user) return <Redirect href="/(auth)/sign-in" />;
   if (!match)
     return (
       <View style={styles.centered}>
-        <Text style={styles.centeredText}>We couldn’t find this chat.</Text>
+        <Text style={styles.centeredText}>We couldn't find this chat.</Text>
       </View>
     );
   if (match.seedId && !partner)
@@ -255,16 +283,41 @@ export default function ChatScreen() {
     );
 
   const keyboardBehavior = Platform.OS === "ios" ? "padding" : "height";
-  const composerBottomPadding = Math.max(insets.bottom, 16);
+  const composerBottomPadding = Platform.OS === "ios" ? Math.max(insets.bottom, 12) : insets.bottom;
+  const keyboardVerticalOffset = Platform.OS === "ios" ? insets.top + 44 : 0;
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={keyboardBehavior}>
-      <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-        <View style={styles.header}>
-          <View>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={keyboardBehavior}
+      keyboardVerticalOffset={keyboardVerticalOffset}
+    >
+      <SafeAreaView style={styles.container} edges={[]}>
+        {/* Header with Back Button */}
+        <View style={styles.headerBar}>
+          <TouchableOpacity 
+            style={styles.backButton}
+            onPress={() => router.back()}
+          >
+            <Ionicons name="chevron-back" size={28} color="#ff4f81" />
+          </TouchableOpacity>
+          <View style={styles.headerContent}>
             <Text style={styles.partnerName}>{partner?.name ?? "Match"}</Text>
             <Text style={styles.partnerSubhead}>You matched — say hi!</Text>
           </View>
+        </View>
+
+        {/* Header Actions */}
+        <View style={styles.headerActions}>
+          {profileRoute ? (
+            <TouchableOpacity
+              style={styles.viewProfileLink}
+              onPress={handleViewProfile}
+            >
+              <Ionicons name="person-circle-outline" size={18} color="#ff4f81" />
+              <Text style={styles.viewProfileText}>View profile</Text>
+            </TouchableOpacity>
+          ) : null}
           {profile?.isPro ? (
             <TouchableOpacity
               style={[styles.startButton, disableAll && styles.startButtonDisabled]}
@@ -288,6 +341,7 @@ export default function ChatScreen() {
           ) : null}
         </View>
 
+        {/* Autopilot Toggle */}
         {profile?.isPro && (
           <View style={styles.autopilotToggleRow}>
             <View style={{ flex: 1 }}>
@@ -297,7 +351,7 @@ export default function ChatScreen() {
               </Text>
             </View>
             <Switch
-              disabled={disableAll} // lock ONLY when my AI is drafting
+              disabled={disableAll}
               value={autoPilotActive}
               onValueChange={(v) => setAutopilotMatch(matchId, v)}
               trackColor={{ true: "#ff9fb5", false: "#ccc" }}
@@ -306,34 +360,48 @@ export default function ChatScreen() {
           </View>
         )}
 
-        <FlatList
-          data={messages}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.messages}
-          renderItem={({ item }) => (
-            <ChatBubble text={item.text} isOwn={item.fromUserId === user.id} />
+        {/* Messages Area */}
+        <View style={styles.messagesWrapper}>
+          <FlatList
+            data={messages}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={styles.messages}
+            renderItem={({ item }) => (
+              <ChatBubble text={item.text} isOwn={item.fromUserId === user.id} />
+            )}
+          />
+
+          {/* Typing Indicators - Positioned at bottom of messages area */}
+          {(showPartnerTyping || showSelfTyping) && (
+            <View style={styles.typingOverlay}>
+              {showPartnerTyping && (
+                <View style={styles.typingRowLeft}>
+                  <View style={styles.typingBubble}>
+                    <TypingDots />
+                  </View>
+                </View>
+              )}
+              {showSelfTyping && (
+                <View style={styles.typingRowRight}>
+                  <View style={[styles.typingBubble, styles.typingBubbleSelf]}>
+                    <TypingDots />
+                  </View>
+                </View>
+              )}
+            </View>
           )}
-        />
+        </View>
 
-        {/* Partner typing (left) */}
-        {showPartnerTyping && (
-          <View style={styles.typingRowLeft}>
-            <View style={styles.typingBubble}>
-              <Text style={styles.typingText}>typing…</Text>
-            </View>
-          </View>
-        )}
-
-        {/* My autopilot typing (right) */}
-        {showSelfTyping && (
-          <View style={styles.typingRowRight}>
-            <View style={[styles.typingBubble, styles.typingBubbleSelf]}>
-              <Text style={styles.typingText}>typing…</Text>
-            </View>
-          </View>
-        )}
-
-        <View style={[styles.composer, { paddingBottom: composerBottomPadding }]}>
+        {/* Composer */}
+        <View
+          style={[styles.composer, { paddingBottom: composerBottomPadding }]}
+          onLayout={(event) => {
+            const next = Math.round(event.nativeEvent.layout.height);
+            if (next !== composerHeight) {
+              setComposerHeight(next);
+            }
+          }}
+        >
           <TextInput
             editable={!disableAll}
             placeholder={disableAll ? "AI is drafting..." : "Type a message"}
@@ -360,17 +428,43 @@ export default function ChatScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#fff" },
-  header: {
+  
+  // Header bar with back button
+  headerBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 8,
+    paddingBottom: 8,
+    paddingTop: 12,
+    backgroundColor: "#fff",
+  },
+  backButton: {
+    padding: 8,
+    marginRight: 4,
+  },
+  headerContent: {
+    flex: 1,
+  },
+  partnerName: { 
+    fontSize: 20, 
+    fontWeight: "700", 
+    color: "#111",
+    marginBottom: 2,
+  },
+  partnerSubhead: { 
+    fontSize: 14, 
+    color: "#777",
+  },
+  headerActions: {
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    alignItems: "center",
     borderBottomWidth: 1,
     borderBottomColor: "#f1f1f1",
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
   },
-  partnerName: { fontSize: 20, fontWeight: "700", color: "#111" },
-  partnerSubhead: { fontSize: 14, color: "#777", marginTop: 4 },
   startButton: {
     flexDirection: "row",
     alignItems: "center",
@@ -378,26 +472,67 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     borderColor: "#ff4f81",
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
   },
   startButtonDisabled: { borderColor: "#bbb" },
   startButtonText: { color: "#ff4f81", fontWeight: "600", fontSize: 14 },
   startButtonTextDisabled: { color: "#999" },
-  messages: { padding: 16, paddingBottom: 12 },
+  viewProfileLink: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#ff4f81",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  viewProfileText: {
+    color: "#ff4f81",
+    fontWeight: "600",
+    fontSize: 14,
+  },
+
+  // Autopilot row
+  autopilotToggleRow: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderBottomWidth: 1,
+    borderBottomColor: "#f1f1f1",
+    backgroundColor: "#fafafa",
+  },
+  autopilotTitle: { fontSize: 15, fontWeight: "600", color: "#111" },
+  autopilotHint: { fontSize: 12, color: "#666", marginTop: 2 },
+
+  // Messages area
+  messagesWrapper: { 
+    flex: 1,
+    position: "relative",
+  },
+  messages: { 
+    padding: 16,
+    paddingBottom: 80,
+  },
 
   // Typing indicators
-  typingRowLeft: {
+  typingOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
     paddingHorizontal: 16,
-    marginTop: -8,
-    marginBottom: 8,
+    paddingBottom: 16,
+    gap: 8,
+  },
+  typingRowLeft: {
     flexDirection: "row",
     justifyContent: "flex-start",
   },
   typingRowRight: {
-    paddingHorizontal: 16,
-    marginTop: -8,
-    marginBottom: 8,
     flexDirection: "row",
     justifyContent: "flex-end",
   },
@@ -411,48 +546,55 @@ const styles = StyleSheet.create({
   typingBubbleSelf: {
     backgroundColor: "#e9f6ff",
   },
-  typingText: { fontSize: 16, color: "#666", fontStyle: "italic" },
 
-  // Autopilot row
-  autopilotToggleRow: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+  // Typing dots animation
+  dotsContainer: {
     flexDirection: "row",
+    gap: 4,
     alignItems: "center",
-    justifyContent: "space-between",
-    borderBottomWidth: 1,
-    borderBottomColor: "#f7f7f7",
+    justifyContent: "center",
+    paddingVertical: 2,
+    paddingHorizontal: 2,
   },
-  autopilotTitle: { fontSize: 16, fontWeight: "600", color: "#111" },
-  autopilotHint: { fontSize: 13, color: "#666", marginTop: 4 },
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#d0d0d0",
+  },
+  dotActive: {
+    backgroundColor: "#888",
+  },
 
   // Composer
   composer: {
     flexDirection: "row",
     alignItems: "flex-end",
     paddingHorizontal: 16,
-    paddingTop: 12,
-    gap: 12,
+    paddingTop: 10,
+    gap: 10,
     borderTopWidth: 1,
     borderTopColor: "#f1f1f1",
+    backgroundColor: "#fff",
   },
   input: {
     flex: 1,
-    minHeight: 44,
+    minHeight: 42,
     maxHeight: 120,
     borderWidth: 1,
     borderColor: "#ddd",
     borderRadius: 16,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingTop: 11,
+    paddingBottom: 11,
     fontSize: 16,
     backgroundColor: "#fafafa",
   },
   sendButton: {
     backgroundColor: "#ff4f81",
     borderRadius: 999,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
   },
   sendDisabled: { opacity: 0.6 },
   sendText: { color: "#fff", fontSize: 16, fontWeight: "600" },

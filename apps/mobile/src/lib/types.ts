@@ -26,6 +26,10 @@ export type SeedProfile = Profile & {
   seedId: string;
 };
 
+export type DiscoverProfile =
+  | (SeedProfile & { kind: "seed"; id: string })
+  | (Profile & { kind: "user"; id: string; isSeed?: false });
+
 export type Match = {
   id: string;
   userA: string;

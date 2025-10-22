@@ -10,6 +10,7 @@ type MatchesState = {
   load: (userId: string) => Promise<void>;
   loadMessages: (matchId: string) => Promise<void>;
   likeSeed: (userId: string, seedId: string) => Promise<Match>;
+  likeUser: (userId: string, targetUserId: string) => Promise<Match>;
   sendMessage: (
     userId: string,
     matchId: string,
@@ -28,6 +29,11 @@ const mapMatch = (row: any, viewerId: string): Match => ({
   autopilot: row.autopilot_enabled ?? false,
   seedId: row.seed_id ?? undefined,
 });
+
+const prependMatch = (matches: Match[], next: Match) => {
+  const filtered = matches.filter((match) => match.id !== next.id);
+  return [next, ...filtered];
+};
 
 const mapMessage = (row: any): Message => ({
   id: row.id,
@@ -104,11 +110,7 @@ export const useMatches = create<MatchesState>((set, get) => ({
     }
     if (existing) {
       const match = mapMatch(existing, userId);
-      set((state) => ({
-        matches: state.matches.some((m) => m.id === match.id)
-          ? state.matches
-          : [match, ...state.matches],
-      }));
+      set((state) => ({ matches: prependMatch(state.matches, match) }));
       return match;
     }
 
@@ -130,7 +132,55 @@ export const useMatches = create<MatchesState>((set, get) => ({
     }
 
     const match = mapMatch(data, userId);
-    set((state) => ({ matches: [match, ...state.matches] }));
+    set((state) => ({ matches: prependMatch(state.matches, match) }));
+    return match;
+  },
+  likeUser: async (userId, targetUserId) => {
+    if (!targetUserId) {
+      throw new Error("Missing match target");
+    }
+
+    const { data: existing, error: existingError } = await supabase
+      .from("matches")
+      .select(
+        "id, user_a, user_b, seed_id, autopilot_enabled, status, created_at",
+      )
+      .is("seed_id", null)
+      .or(
+        `and(user_a.eq.${userId},user_b.eq.${targetUserId}),and(user_a.eq.${targetUserId},user_b.eq.${userId})`,
+      )
+      .maybeSingle();
+
+    if (existingError) {
+      throw existingError;
+    }
+
+    if (existing) {
+      const match = mapMatch(existing, userId);
+      set((state) => ({ matches: prependMatch(state.matches, match) }));
+      return match;
+    }
+
+    const { data, error } = await supabase
+      .from("matches")
+      .insert({
+        user_a: userId,
+        user_b: targetUserId,
+        seed_id: null,
+        autopilot_enabled: true,
+        status: "active",
+      })
+      .select(
+        "id, user_a, user_b, seed_id, autopilot_enabled, status, created_at",
+      )
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    const match = mapMatch(data, userId);
+    set((state) => ({ matches: prependMatch(state.matches, match) }));
     return match;
   },
   sendMessage: async (userId, matchId, text) => {
@@ -167,20 +217,26 @@ export const useMatches = create<MatchesState>((set, get) => ({
     return message;
   },
   setAutopilot: async (matchId, active) => {
+    const previous = get().matches.find((match) => match.id === matchId)?.autopilot;
+    set((state) => ({
+      matches: state.matches.map((match) =>
+        match.id === matchId ? { ...match, autopilot: active } : match,
+      ),
+    }));
+
     const { error } = await supabase
       .from("matches")
       .update({ autopilot_enabled: active })
       .eq("id", matchId);
 
     if (error) {
+      set((state) => ({
+        matches: state.matches.map((match) =>
+          match.id === matchId ? { ...match, autopilot: previous } : match,
+        ),
+      }));
       throw error;
     }
-
-    set((state) => ({
-      matches: state.matches.map((match) =>
-        match.id === matchId ? { ...match, autopilot: active } : match,
-      ),
-    }));
   },
   reset: () =>
     set({ matches: [], messages: {}, isLoadingMatches: false, isLoadingMessages: {} }),

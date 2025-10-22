@@ -98,6 +98,13 @@ create table dismissed_seeds (
   primary key (user_id, seed_id)
 );
 
+create table dismissed_profiles (
+  user_id uuid references auth.users on delete cascade,
+  target_user_id uuid references auth.users on delete cascade,
+  dismissed_at timestamptz not null default now(),
+  primary key (user_id, target_user_id)
+);
+
 create table matches (
   id uuid primary key default gen_random_uuid(),
   user_a uuid not null references auth.users on delete cascade,
@@ -141,13 +148,20 @@ create policy "owner dismissed read" on dismissed_seeds
 create policy "owner dismissed write" on dismissed_seeds
   for insert with check (auth.uid() = user_id);
 
+alter table dismissed_profiles enable row level security;
+create policy "owner dismissed profile read" on dismissed_profiles
+  for select using (auth.uid() = user_id);
+create policy "owner dismissed profile write" on dismissed_profiles
+  for insert with check (auth.uid() = user_id);
+
 alter table matches enable row level security;
 create policy "participant read" on matches
   for select using (auth.uid() = user_a or auth.uid() = user_b);
 create policy "owner create seed match" on matches
   for insert with check (auth.uid() = user_a);
-create policy "owner update match" on matches
-  for update using (auth.uid() = user_a);
+create policy "participant update match" on matches
+  for update using (auth.uid() = user_a or auth.uid() = user_b)
+  with check (auth.uid() = user_a or auth.uid() = user_b);
 
 alter table messages enable row level security;
 create policy "participant read messages" on messages
@@ -160,7 +174,8 @@ create policy "participant write messages" on messages
   for insert with check (
     sender_id = auth.uid() and
     exists (select 1 from matches m
-      where m.id = messages.match_id and m.user_a = auth.uid())
+      where m.id = messages.match_id
+        and (m.user_a = auth.uid() or m.user_b = auth.uid()))
   );
 ```
 

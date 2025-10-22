@@ -35,17 +35,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const userId = auth.user.id;
 
   try {
-    const [{ error: delDismissed }, { error: delMatches }] = await Promise.all([
+    const [
+      { error: delDismissedSeeds },
+      { error: delDismissedProfiles },
+      { error: delMatches },
+    ] = await Promise.all([
       supabase.from("dismissed_seeds").delete().eq("user_id", userId),
+      supabase.from("dismissed_profiles").delete().eq("user_id", userId),
       supabase
         .from("matches")
         .delete()
-        .eq("user_a", userId)
-        .not("seed_id", "is", null),
+        .or(`user_a.eq.${userId},user_b.eq.${userId}`),
     ]);
 
-    if (delDismissed || delMatches) {
-      console.error("dev-reset errors", delDismissed, delMatches);
+    if (delDismissedSeeds || delDismissedProfiles || delMatches) {
+      console.error("dev-reset errors", delDismissedSeeds, delDismissedProfiles, delMatches);
     }
 
     res.status(200).json({ ok: true });

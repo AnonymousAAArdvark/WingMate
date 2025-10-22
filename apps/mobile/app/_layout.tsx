@@ -24,6 +24,14 @@ export default function RootLayout() {
       <Stack.Screen name="(auth)" />
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="chat" options={{ headerShown: false }} />
+      <Stack.Screen
+        name="profile/[profileId]"
+        options={{
+          headerShown: true,
+          title: "Profile",
+          presentation: "modal",
+        }}
+      />
     </Stack>
   );
 }

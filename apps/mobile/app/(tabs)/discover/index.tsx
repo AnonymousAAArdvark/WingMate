@@ -11,14 +11,16 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import ProfileCard from "../../src/components/ProfileCard";
-import { DEV_FEATURES_ENABLED } from "../../src/lib/config";
-import type { SeedProfile } from "../../src/lib/types";
-import { useAuth } from "../../src/store/useAuth";
-import { useMatches } from "../../src/store/useMatches";
-import { supabase } from "../../src/lib/supabase";
-import { BASE_URL } from "../../src/lib/api";
-import { mapSeedProfile } from "../../src/lib/mappers";
+import ProfileCard from "../../../src/components/ProfileCard";
+import { DEV_FEATURES_ENABLED } from "../../../src/lib/config";
+import type { DiscoverProfile } from "../../../src/lib/types";
+import { useAuth } from "../../../src/store/useAuth";
+import { useMatches } from "../../../src/store/useMatches";
+import { supabase } from "../../../src/lib/supabase";
+import { BASE_URL } from "../../../src/lib/api";
+import { mapProfileRow, mapSeedProfile } from "../../../src/lib/mappers";
+
+export const options = {};
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const CARD_HORIZONTAL_MARGIN = 24;
@@ -31,13 +33,14 @@ export default function DiscoverScreen() {
   const user = useAuth((state) => state.user);
   const loadMatches = useMatches((state) => state.load);
   const likeSeed = useMatches((state) => state.likeSeed);
+  const likeUser = useMatches((state) => state.likeUser);
   const matches = useMatches((state) => state.matches);
   const resetMatchesStore = useMatches((state) => state.reset);
   const session = useAuth((state) => state.session);
 
   const position = useRef(new Animated.ValueXY()).current;
   const isAnimating = useRef(false);
-  const [deck, setDeck] = useState<SeedProfile[]>([]);
+  const [deck, setDeck] = useState<DiscoverProfile[]>([]);
   const [deckReady, setDeckReady] = useState(false);
 
   useFocusEffect(
@@ -55,13 +58,24 @@ export default function DiscoverScreen() {
     }
     try {
       const matchedSeedSet = new Set<string>();
+      const matchedUserSet = new Set<string>();
       matches.forEach((match) => {
         if (match.seedId) {
           matchedSeedSet.add(match.seedId);
+        } else {
+          const counterpart = match.userA === user.id ? match.userB : match.userA;
+          if (counterpart) {
+            matchedUserSet.add(counterpart);
+          }
         }
       });
 
-      const [{ data: seedsData, error: seedsError }, { data: dismissedData, error: dismissedError }] = await Promise.all([
+      const [
+        { data: seedsData, error: seedsError },
+        { data: dismissedSeedData, error: dismissedSeedError },
+        { data: dismissedProfileData, error: dismissedProfileError },
+        { data: profilesData, error: profilesError },
+      ] = await Promise.all([
         supabase
           .from("seed_profiles")
           .select(
@@ -72,21 +86,64 @@ export default function DiscoverScreen() {
           .from("dismissed_seeds")
           .select("seed_id")
           .eq("user_id", user.id),
+        supabase
+          .from("dismissed_profiles")
+          .select("target_user_id")
+          .eq("user_id", user.id),
+        supabase
+          .from("profiles")
+          .select(
+            "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
+          )
+          .neq("id", user.id),
       ]);
 
       if (seedsError) throw seedsError;
-      if (dismissedError) throw dismissedError;
+      if (dismissedSeedError) throw dismissedSeedError;
+      if (dismissedProfileError) throw dismissedProfileError;
+      if (profilesError) throw profilesError;
 
-      const dismissedSet = new Set<string>(
-        (dismissedData ?? []).map((row) => row.seed_id as string),
+      const dismissedSeedSet = new Set<string>(
+        (dismissedSeedData ?? []).map((row) => row.seed_id as string),
+      );
+      const dismissedUserSet = new Set<string>(
+        (dismissedProfileData ?? []).map((row) => row.target_user_id as string),
       );
 
-      const seeds = (seedsData ?? []).map(mapSeedProfile);
-      const filtered = seeds.filter(
-        (seed) =>
-          !dismissedSet.has(seed.seedId) && !matchedSeedSet.has(seed.seedId),
-      );
-      setDeck(filtered);
+      const seeds = (seedsData ?? [])
+        .map(mapSeedProfile)
+        .filter(
+          (seed) =>
+            !dismissedSeedSet.has(seed.seedId) && !matchedSeedSet.has(seed.seedId),
+        )
+        .map((seed) => ({ ...seed, kind: "seed", id: seed.seedId } as DiscoverProfile));
+
+      const humans = (profilesData ?? [])
+        .map(mapProfileRow)
+        .filter((profile) =>
+          profile.userId &&
+          profile.userId !== user.id &&
+          profile.name.trim() &&
+          profile.bio.trim(),
+        )
+        .filter(
+          (profile) =>
+            !dismissedUserSet.has(profile.userId) &&
+            !matchedUserSet.has(profile.userId),
+        )
+        .map(
+          (profile) =>
+            ({ ...profile, kind: "user", id: profile.userId, isSeed: false } as DiscoverProfile),
+        );
+
+      const combined: DiscoverProfile[] = [];
+      const longest = Math.max(seeds.length, humans.length);
+      for (let i = 0; i < longest; i += 1) {
+        if (i < humans.length) combined.push(humans[i]);
+        if (i < seeds.length) combined.push(seeds[i]);
+      }
+
+      setDeck(combined);
     } catch (error) {
       console.error("Failed to refresh deck", error);
       setDeck([]);
@@ -105,52 +162,70 @@ export default function DiscoverScreen() {
   useEffect(() => {
     position.setValue({ x: 0, y: 0 });
     isAnimating.current = false;
-  }, [currentProfile?.seedId, position]);
+  }, [currentProfile?.id, position]);
 
   const handleLike = useCallback(
-    async (seedId: string) => {
-      if (!user) return;
-      const match = await likeSeed(user.id, seedId);
-      router.push({
-        pathname: "/chat/[matchId]",
-        params: { matchId: match.id },
-      });
+    async (card: DiscoverProfile) => {
+      if (!user) return null;
+      if (card.kind === "seed") {
+        return likeSeed(user.id, card.seedId);
+      }
+      return likeUser(user.id, card.userId);
     },
-    [likeSeed, router, user],
+    [likeSeed, likeUser, user],
   );
 
-  const removeFromDeck = useCallback((seedId: string) => {
-    setDeck((prev) => prev.filter((seed) => seed.seedId !== seedId));
+  const removeFromDeck = useCallback((cardId: string) => {
+    setDeck((prev) => prev.filter((item) => item.id !== cardId));
   }, []);
 
-  const dismissSeed = useCallback(
-    async (seedId: string) => {
+  const dismissCard = useCallback(
+    async (card: DiscoverProfile) => {
+      removeFromDeck(card.id);
       if (!user?.id) return;
-      removeFromDeck(seedId);
-      const { error } = await supabase
-        .from("dismissed_seeds")
-        .upsert({ user_id: user.id, seed_id: seedId });
-      if (error) {
-        console.error("Failed to dismiss seed", error);
+      try {
+        if (card.kind === "seed") {
+          await supabase
+            .from("dismissed_seeds")
+            .upsert(
+              { user_id: user.id, seed_id: card.seedId },
+              { onConflict: "user_id,seed_id", ignoreDuplicates: true },
+            );
+        } else {
+          await supabase
+            .from("dismissed_profiles")
+            .upsert(
+              { user_id: user.id, target_user_id: card.userId },
+              { onConflict: "user_id,target_user_id", ignoreDuplicates: true },
+            );
+        }
+      } catch (error) {
+        console.error("Failed to dismiss profile", error);
       }
     },
     [removeFromDeck, user?.id],
   );
 
   const completeSwipe = useCallback(
-    async (direction: "left" | "right", card?: SeedProfile) => {
+    async (direction: "left" | "right", card?: DiscoverProfile) => {
       try {
         if (!card) {
           return;
         }
         if (direction === "right") {
-          await handleLike(card.seedId);
+          const match = await handleLike(card);
+          if (match) {
+            router.push({
+              pathname: "/chat/[matchId]",
+              params: { matchId: match.id },
+            });
+          }
         }
       } finally {
         isAnimating.current = false;
       }
     },
-    [handleLike],
+    [handleLike, router],
   );
 
   const resetPosition = useCallback(() => {
@@ -175,11 +250,11 @@ export default function DiscoverScreen() {
         duration: SWIPE_OUT_DURATION,
         useNativeDriver: true,
       }).start(() => {
-        void dismissSeed(card.seedId);
+        void dismissCard(card);
         void completeSwipe(direction, card);
       });
     },
-    [currentProfile, dismissSeed, completeSwipe, position],
+    [currentProfile, dismissCard, completeSwipe, position],
   );
 
   const panResponder = useMemo(
@@ -250,14 +325,14 @@ export default function DiscoverScreen() {
     return (
       <>
         {remaining
-          .map((seed) => (
+          .map((profile) => (
             <View
-              key={seed.seedId}
+              key={profile.id}
               style={[styles.cardContainer, styles.stackedCard]}
               pointerEvents="none"
             >
               <ProfileCard
-                profile={seed}
+                profile={profile}
                 onLike={() => {}}
                 onPass={() => {}}
               />
@@ -265,7 +340,7 @@ export default function DiscoverScreen() {
           ))
           .reverse()}
         <Animated.View
-          key={currentProfile.seedId}
+          key={currentProfile.id}
           style={[styles.cardContainer, topCardStyle]}
           {...panResponder.panHandlers}
         >
@@ -298,10 +373,7 @@ export default function DiscoverScreen() {
   };
 
   return (
-    <SafeAreaView
-      style={styles.container}
-      edges={["top", "left", "right"]}
-    >
+    <SafeAreaView style={styles.container} edges={["left", "right", "bottom"]}>
       <View style={styles.deck}>
         {renderCards()}
       </View>
