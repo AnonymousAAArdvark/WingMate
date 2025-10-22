@@ -17,7 +17,7 @@ Wingmate is now a fully hosted prototype: the Expo app persists every profile, m
 - **Mobile (apps/mobile)** – Expo + TypeScript, Zustand for client cache, Supabase client with persisted sessions.
 - **Backend (server)** – Vercel Function `api/chat.ts` reads/writes Supabase and calls OpenAI (GPT-4o-mini by default).
 - **Supabase** – Stores `profiles`, `seed_profiles`, `matches`, `messages`, and `dismissed_seeds`, with row-level security so each user only touches their rows.
-- **Autopilot** – Pro users can auto-draft openers and follow-ups via an `autopilotDraft` mode on the same `/api/chat` endpoint (no local secrets in the app). When Autopilot is enabled on a match, the backend now continues conversations even if the app is closed or the user is logged out.
+- **Autopilot** – Pro users (including seeded demo profiles) now auto-reply through a Supabase trigger + edge function pipeline. Once a message lands in the database the edge function generates the partner’s reply—even if both clients are offline—with realistic typing delays.
 
 ---
 
@@ -216,8 +216,54 @@ EXPO_PUBLIC_DEV_FEATURES="true"
 ```
 
 - The Expo client uses the anon key and persists sessions in AsyncStorage.
+- The edge function uses the service role key and OpenAI key; make sure those values are set when you deploy to production.
 - Set the dev feature flags to `true` when you want quick-reset tooling (e.g., resetting the seed deck from Discover even when it is not empty).
 - The Vercel function uses the service-role key **only** on the server to read/write messages and verify JWTs.
+
+---
+
+## Background Autopilot
+
+Autopilot is now handled entirely inside Supabase. The control flow looks like this:
+
+```
+INSERT INTO messages
+        ↓
+Postgres trigger → Edge Function (`autopilot-handler`)
+        ↓
+Edge function checks the recipient’s Pro/autopilot status, generates a reply with OpenAI, waits 1–5 seconds, and inserts it.
+        ↓
+The new reply fires the trigger again—if the other participant has autopilot enabled, the process repeats.
+```
+
+### Setup Checklist
+
+1. **Deploy the edge function**
+   ```bash
+   supabase functions deploy autopilot-handler \
+     --project-ref <your-project-ref>
+   ```
+   Source lives in `supabase/functions/autopilot-handler`.
+
+2. **Expose the edge-function secret to Postgres**
+   ```sql
+   -- run once in the SQL editor (replace with your edge function anon key)
+   SELECT set_config('app.edge_function_secret', 'SUPABASE_EDGE_FUNCTION_ANON_KEY', true);
+   ```
+
+3. **Install the trigger**
+   Run the SQL in `supabase/db/autopilot_trigger.sql`. Before executing, replace the placeholder URL with your project’s `functions.v1` endpoint.
+
+4. **Ensure `pg_net` is enabled**
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS "pg_net";
+   ```
+
+5. **Environment variables**
+   - Edge function expects `OPENAI_API_KEY`, `OPENAI_MODEL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+   - Vercel/server continue to use those values for the draft/autopilot endpoints.
+
+The mobile client now listens on a realtime channel for `messages` inserts, so replies added by the edge function appear instantly along with typing indicators.
 
 ---
 
