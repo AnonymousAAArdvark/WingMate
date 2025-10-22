@@ -1,5 +1,8 @@
 {
   "version": 2,
-  "builds": [{ "src": "api/chat.ts", "use": "@vercel/node" }],
-  "routes": [{ "src": "/api/chat", "dest": "/api/chat.ts" }]
+  "builds": [{ "src": "api/*.ts", "use": "@vercel/node" }],
+  "routes": [
+    { "src": "/api/chat", "dest": "/api/chat.ts" },
+    { "src": "/api/dev-reset", "dest": "/api/dev-reset.ts" }
+  ]
 }
