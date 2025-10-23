@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -54,7 +54,10 @@ export default function ChatScreen() {
   const messagesMap = useMatches((s) => s.messages);
   const sendMessage = useMatches((s) => s.sendMessage);
   const loadMessages = useMatches((s) => s.loadMessages);
+  const markConversationRead = useMatches((s) => s.markRead);
   const setAutopilotMatch = useMatches((s) => s.setAutopilot);
+  const sendTypingStatus = useMatches((s) => s.sendTypingStatus);
+  const setTypingState = useMatches((s) => s.setTypingState);
   const profile = useProfile((s) => s.profile);
   const loadProfile = useProfile((s) => s.load);
 
@@ -63,9 +66,15 @@ export default function ChatScreen() {
 
   // Drafting/typing state
   const [isSelfAIDrafting, setIsSelfAIDrafting] = useState(false);
-  const [isPartnerAIDrafting, setIsPartnerAIDrafting] = useState(false);
-  const [isTypingPartner, setIsTypingPartner] = useState(false);
   const [isDraftingOpener, setIsDraftingOpener] = useState(false);
+  const typingState = useMatches((s) => (matchId ? s.typing[matchId] : undefined));
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTypingRef = useRef(false);
+  const lastReadMessageIdRef = useRef<string | null>(null);
+  const partnerTypingActive = Boolean(typingState?.partnerTyping);
+  const partnerAutopilotActive = Boolean(typingState?.partnerAutopilot);
+  const selfAutopilotActive = Boolean(typingState?.selfAutopilot);
+  const disableAll = isSelfAIDrafting || selfAutopilotActive;
 
   const match = useMemo(() => matches.find((m) => m.id === matchId), [matches, matchId]);
   const messages = messagesMap[matchId] ?? [];
@@ -111,6 +120,25 @@ export default function ChatScreen() {
   }, [loadMessages, matchId, user?.id]);
 
   useEffect(() => {
+    lastReadMessageIdRef.current = null;
+  }, [matchId]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    if (!matchId) return;
+    if (!messages.length) return;
+    const latest = messages[messages.length - 1];
+    if (!latest) return;
+    if (lastReadMessageIdRef.current === latest.id) return;
+
+    const isOwnMessage = latest.fromUserId ? latest.fromUserId === user.id : false;
+    lastReadMessageIdRef.current = latest.id;
+    if (!isOwnMessage) {
+      markConversationRead(matchId, user.id);
+    }
+  }, [messages, user?.id, matchId, markConversationRead]);
+
+  useEffect(() => {
     if (!match) return;
     let cancelled = false;
 
@@ -148,64 +176,54 @@ export default function ChatScreen() {
   }, [match, user?.id]);
 
   useEffect(() => {
-    if (!matchId || !user?.id) return;
+    if (!user?.id) return;
+    if (!matchId) return;
 
-    const channel = supabase
-      .channel(`match:${matchId}`)
-      .on("broadcast", { event: "autopilot_drafting" }, (payload: any) => {
-        const fromId = payload?.payload?.sender_id;
-        if (!fromId) return;
+    const flush = () => {
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+      if (isTypingRef.current) {
+        isTypingRef.current = false;
+        sendTypingStatus(matchId, user.id, false);
+      }
+    };
 
-        if (fromId === user.id) {
-          setIsSelfAIDrafting(true);
-        } else {
-          setIsPartnerAIDrafting(true);
-          setIsTypingPartner(true);
+    const disabled = disableAll;
+
+    if (disabled) {
+      flush();
+      return () => flush();
+    }
+
+    const hasContent = messageText.trim().length > 0;
+    if (hasContent) {
+      if (!isTypingRef.current) {
+        isTypingRef.current = true;
+        sendTypingStatus(matchId, user.id, true);
+      }
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+      typingTimeoutRef.current = setTimeout(() => {
+        if (isTypingRef.current) {
+          isTypingRef.current = false;
+          sendTypingStatus(matchId, user.id, false);
         }
-      })
-      .on("broadcast", { event: "autopilot_drafting_done" }, (payload: any) => {
-        const fromId = payload?.payload?.sender_id;
-        if (!fromId) return;
-
-        if (fromId === user.id) {
-          setIsSelfAIDrafting(false);
-        } else {
-          setIsPartnerAIDrafting(false);
-          setIsTypingPartner(false);
-        }
-      })
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `match_id=eq.${matchId}`,
-        },
-        (payload: any) => {
-          const newMsg = payload.new as { sender_id: string | null; is_seed: boolean | null };
-          const senderId = newMsg.sender_id;
-          loadMessages(matchId, user.id);
-
-          if ((partnerUserId && senderId === partnerUserId) || (!partnerUserId && newMsg.is_seed)) {
-            setIsTypingPartner(false);
-            setIsPartnerAIDrafting(false);
-          }
-
-          if (senderId === user.id) {
-            setIsSelfAIDrafting(false);
-          }
-        }
-      )
-      .subscribe();
+        typingTimeoutRef.current = null;
+      }, 1500);
+    } else {
+      flush();
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      flush();
     };
-  }, [matchId, user?.id, partnerUserId, loadMessages]);
+  }, [messageText, disableAll, matchId, user?.id, sendTypingStatus]);
 
   const handleSend = async () => {
-    if (!user || !messageText.trim() || isSelfAIDrafting) return;
+    if (!user || !messageText.trim() || disableAll) return;
     setSending(true);
     const text = messageText.trim();
     setMessageText("");
@@ -219,6 +237,7 @@ export default function ChatScreen() {
   const runAutopilotOpener = useCallback(async () => {
     if (!user || isSelfAIDrafting || !session?.access_token) return;
 
+    setTypingState(matchId, { selfAutopilot: true });
     setIsSelfAIDrafting(true);
     setIsDraftingOpener(true);
 
@@ -271,12 +290,21 @@ export default function ChatScreen() {
     } finally {
       setIsSelfAIDrafting(false);
       setIsDraftingOpener(false);
+      setTypingState(matchId, { selfAutopilot: false });
     }
-  }, [user, session?.access_token, matchId, profile, partner, sendMessage, messagesMap]);
+  }, [
+    user,
+    session?.access_token,
+    matchId,
+    profile,
+    partner,
+    sendMessage,
+    messagesMap,
+    setTypingState,
+  ]);
 
-  const disableAll = isSelfAIDrafting;
-  const showPartnerTyping = isTypingPartner || isPartnerAIDrafting;
-  const showSelfTyping = isSelfAIDrafting;
+  const showPartnerTyping = partnerTypingActive || partnerAutopilotActive;
+  const showSelfTyping = isSelfAIDrafting || selfAutopilotActive;
 
   if (!user) return <Redirect href="/(auth)/sign-in" />;
   if (!match)

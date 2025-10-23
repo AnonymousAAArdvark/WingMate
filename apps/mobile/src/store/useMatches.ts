@@ -3,15 +3,23 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import type { Match, Message } from "../lib/types";
 
+type TypingSnapshot = {
+  partnerTyping: boolean;
+  partnerAutopilot: boolean;
+  selfAutopilot: boolean;
+};
+
 type MatchesState = {
   matches: Match[];
   messages: Record<string, Message[]>;
+  typing: Record<string, TypingSnapshot>;
+  channels: Record<string, RealtimeChannel>;
   isLoadingMatches: boolean;
   isLoadingMessages: Record<string, boolean>;
   viewerId?: string;
-  messageChannel?: RealtimeChannel | null;
   load: (userId: string) => Promise<void>;
   loadMessages: (matchId: string, userId: string) => Promise<void>;
+  markRead: (matchId: string, userId: string) => Promise<void>;
   likeSeed: (userId: string, seedId: string) => Promise<Match>;
   likeUser: (userId: string, targetUserId: string) => Promise<Match>;
   sendMessage: (
@@ -19,6 +27,8 @@ type MatchesState = {
     matchId: string,
     text: string,
   ) => Promise<Message>;
+  sendTypingStatus: (matchId: string, userId: string, typing: boolean) => Promise<void>;
+  setTypingState: (matchId: string, patch: Partial<TypingSnapshot>) => void;
   setAutopilot: (matchId: string, active: boolean) => Promise<void>;
   reset: () => void;
 };
@@ -63,13 +73,167 @@ const mapMessage = (row: any): Message => ({
   createdAt: Date.parse(row.created_at ?? new Date().toISOString()),
 });
 
-export const useMatches = create<MatchesState>((set, get) => ({
-  matches: [],
+const defaultTypingState: TypingSnapshot = {
+  partnerTyping: false,
+  partnerAutopilot: false,
+  selfAutopilot: false,
+};
+
+const mergeTypingState = (
+  current: TypingSnapshot | undefined,
+  patch: Partial<TypingSnapshot>,
+): TypingSnapshot | undefined => {
+  const next = { ...defaultTypingState, ...(current ?? {}), ...patch };
+  if (!next.partnerTyping && !next.partnerAutopilot && !next.selfAutopilot) {
+    return undefined;
+  }
+  return next;
+};
+
+export const useMatches = create<MatchesState>((set, get) => {
+  const applyTypingPatch = (matchId: string, patch: Partial<TypingSnapshot>) => {
+    set((state) => {
+      const merged = mergeTypingState(state.typing[matchId], patch);
+      if (!merged) {
+        if (!state.typing[matchId]) return state;
+        const { [matchId]: _removed, ...rest } = state.typing;
+        return { typing: rest };
+      }
+      return { typing: { ...state.typing, [matchId]: merged } };
+    });
+  };
+
+  const handleMessageEvent = (row: any) => {
+    if (!row) return;
+    const message = mapMessage(row);
+    set((state) => {
+      const matchId = message.matchId;
+      const existing = state.messages[matchId] ?? [];
+      const isOwn = message.fromUserId
+        ? message.fromUserId === state.viewerId
+        : false;
+
+      const typingPatch = isOwn
+        ? { selfAutopilot: false }
+        : { partnerTyping: false, partnerAutopilot: false };
+
+      const mergedTyping = mergeTypingState(state.typing[matchId], typingPatch);
+      let nextTyping = state.typing;
+      if (state.typing[matchId] || mergedTyping) {
+        if (mergedTyping) {
+          nextTyping = { ...state.typing, [matchId]: mergedTyping };
+        } else {
+          const { [matchId]: _removed, ...rest } = state.typing;
+          nextTyping = rest;
+        }
+      }
+
+      if (existing.some((item) => item.id === message.id)) {
+        if (nextTyping !== state.typing) {
+          return { typing: nextTyping };
+        }
+        return state;
+      }
+
+      const nextMessages = [...existing, message].sort(
+        (a, b) => a.createdAt - b.createdAt,
+      );
+
+      const updatedMatches = sortMatches(
+        state.matches.map((match) => {
+          if (match.id !== matchId) return match;
+          const unreadCount = isOwn ? match.unreadCount : match.unreadCount + 1;
+          return {
+            ...match,
+            lastMessageAt: message.createdAt,
+            lastMessageText: message.text,
+            lastMessageSenderId: message.fromUserId ?? null,
+            lastMessageFromAI: message.fromAI ?? false,
+            unreadCount,
+          };
+        }),
+      );
+
+      return {
+        messages: { ...state.messages, [matchId]: nextMessages },
+        matches: updatedMatches,
+        typing: nextTyping,
+      };
+    });
+  };
+
+  const syncMatchSubscriptions = (matches: Match[], viewerId: string) => {
+    const currentChannels = get().channels;
+    const nextChannels: Record<string, RealtimeChannel> = { ...currentChannels };
+    const targetIds = new Set(matches.map((match) => match.id));
+
+    Object.entries(currentChannels).forEach(([matchId, channel]) => {
+      if (!targetIds.has(matchId)) {
+        supabase.removeChannel(channel);
+        delete nextChannels[matchId];
+        set((state) => {
+          if (!state.typing[matchId]) return state;
+          const { [matchId]: _removed, ...rest } = state.typing;
+          return { typing: rest };
+        });
+      }
+    });
+
+    matches.forEach((match) => {
+      if (nextChannels[match.id]) return;
+      const channel = supabase
+        .channel(`match:${match.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "messages",
+            filter: `match_id=eq.${match.id}`,
+          },
+          (payload) => handleMessageEvent(payload.new),
+        )
+        .on("broadcast", { event: "autopilot_drafting" }, (payload: any) => {
+          const senderId = payload?.payload?.sender_id as string | undefined;
+          const isSelf = senderId === viewerId;
+          const patch = isSelf
+            ? { selfAutopilot: true }
+            : { partnerAutopilot: true, partnerTyping: true };
+          applyTypingPatch(match.id, patch);
+        })
+        .on("broadcast", { event: "autopilot_drafting_done" }, (payload: any) => {
+          const senderId = payload?.payload?.sender_id as string | undefined;
+          const isSelf = senderId === viewerId;
+          const patch = isSelf
+            ? { selfAutopilot: false }
+            : { partnerAutopilot: false, partnerTyping: false };
+          applyTypingPatch(match.id, patch);
+        })
+        .on("broadcast", { event: "typing" }, (payload: any) => {
+          const senderId = payload?.payload?.sender_id as string | undefined;
+          if (!senderId || senderId === viewerId) return;
+          applyTypingPatch(match.id, { partnerTyping: true });
+        })
+        .on("broadcast", { event: "typing_stop" }, (payload: any) => {
+          const senderId = payload?.payload?.sender_id as string | undefined;
+          if (!senderId || senderId === viewerId) return;
+          applyTypingPatch(match.id, { partnerTyping: false });
+        })
+        .subscribe();
+
+      nextChannels[match.id] = channel;
+    });
+
+    set({ channels: nextChannels });
+  };
+  return {
+    matches: [],
   messages: {},
+  typing: {},
+  channels: {},
   isLoadingMatches: false,
   isLoadingMessages: {},
   viewerId: undefined,
-  messageChannel: null,
   load: async (userId) => {
     set({ isLoadingMatches: true });
     try {
@@ -83,50 +247,29 @@ export const useMatches = create<MatchesState>((set, get) => ({
 
       const matches = sortMatches((data ?? []).map((row: any) => mapMatch(row)));
       set({ matches, viewerId: userId });
-      const existingChannel = get().messageChannel;
-      if (!existingChannel) {
-        const channel = supabase
-          .channel(`messages:${userId}`)
-          .on(
-            "postgres_changes",
-            { event: "INSERT", schema: "public", table: "messages" },
-            (payload) => {
-              const newRow = payload.new;
-              if (!newRow) return;
-              const message = mapMessage(newRow);
-              set((state) => {
-                const currentMessages = state.messages[message.matchId] ?? [];
-                if (currentMessages.some((item) => item.id === message.id)) {
-                  return state;
-                }
-                const nextMessages = {
-                  ...state.messages,
-                  [message.matchId]: [...currentMessages, message],
-                };
-                const updatedMatches = sortMatches(
-                  state.matches.map((match) => {
-                    if (match.id !== message.matchId) return match;
-                    const isOwn = message.fromUserId === state.viewerId;
-                    return {
-                      ...match,
-                      lastMessageAt: message.createdAt,
-                      lastMessageText: message.text,
-                      lastMessageSenderId: message.fromUserId ?? null,
-                      lastMessageFromAI: message.fromAI ?? false,
-                      unreadCount: isOwn ? match.unreadCount : match.unreadCount + 1,
-                    };
-                  }),
-                );
-                return { matches: updatedMatches, messages: nextMessages };
-              });
-            },
-          )
-          .subscribe();
-        set({ messageChannel: channel });
-      }
+      syncMatchSubscriptions(matches, userId);
     } finally {
       set({ isLoadingMatches: false });
     }
+  },
+  markRead: async (matchId, userId) => {
+    try {
+      await supabase
+        .from("message_read_receipts")
+        .upsert(
+          { match_id: matchId, user_id: userId, last_read_at: new Date().toISOString() },
+          { onConflict: "match_id,user_id" },
+        );
+    } catch (error) {
+      console.warn("Failed to mark conversation read", error);
+    }
+    set((state) => ({
+      matches: sortMatches(
+        state.matches.map((match) =>
+          match.id === matchId ? { ...match, unreadCount: 0 } : match,
+        ),
+      ),
+    }));
   },
   loadMessages: async (matchId, userId) => {
     set((state) => ({
@@ -148,19 +291,7 @@ export const useMatches = create<MatchesState>((set, get) => ({
         messages: { ...state.messages, [matchId]: mapped },
       }));
       if (userId) {
-        await supabase
-          .from("message_read_receipts")
-          .upsert(
-            { match_id: matchId, user_id: userId, last_read_at: new Date().toISOString() },
-            { onConflict: "match_id,user_id" },
-          );
-        set((state) => ({
-          matches: sortMatches(
-            state.matches.map((match) =>
-              match.id === matchId ? { ...match, unreadCount: 0 } : match,
-            ),
-          ),
-        }));
+        await get().markRead(matchId, userId);
       }
     } finally {
       set((state) => ({
@@ -184,6 +315,10 @@ export const useMatches = create<MatchesState>((set, get) => ({
     if (existing) {
       const match = mapMatch(existing);
       set((state) => ({ matches: sortMatches(prependMatch(state.matches, match)) }));
+      const viewerId = get().viewerId ?? userId;
+      if (viewerId) {
+        syncMatchSubscriptions(get().matches, viewerId);
+      }
       return match;
     }
 
@@ -206,6 +341,10 @@ export const useMatches = create<MatchesState>((set, get) => ({
 
     const match = mapMatch(data);
     set((state) => ({ matches: sortMatches(prependMatch(state.matches, match)) }));
+    const viewerId = get().viewerId ?? userId;
+    if (viewerId) {
+      syncMatchSubscriptions(get().matches, viewerId);
+    }
     return match;
   },
   likeUser: async (userId, targetUserId) => {
@@ -231,6 +370,10 @@ export const useMatches = create<MatchesState>((set, get) => ({
     if (existing) {
       const match = mapMatch(existing);
       set((state) => ({ matches: sortMatches(prependMatch(state.matches, match)) }));
+      const viewerId = get().viewerId ?? userId;
+      if (viewerId) {
+        syncMatchSubscriptions(get().matches, viewerId);
+      }
       return match;
     }
 
@@ -254,6 +397,10 @@ export const useMatches = create<MatchesState>((set, get) => ({
 
     const match = mapMatch(data);
     set((state) => ({ matches: sortMatches(prependMatch(state.matches, match)) }));
+    const viewerId = get().viewerId ?? userId;
+    if (viewerId) {
+      syncMatchSubscriptions(get().matches, viewerId);
+    }
     return match;
   },
   sendMessage: async (userId, matchId, text) => {
@@ -302,15 +449,28 @@ export const useMatches = create<MatchesState>((set, get) => ({
         matches: updatedMatches,
       };
     });
+    applyTypingPatch(matchId, { selfAutopilot: false });
     if (userId) {
-      await supabase
-        .from("message_read_receipts")
-        .upsert(
-          { match_id: matchId, user_id: userId, last_read_at: new Date().toISOString() },
-          { onConflict: "match_id,user_id" },
-        );
+      await get().markRead(matchId, userId);
+      await get().sendTypingStatus(matchId, userId, false);
     }
     return message;
+  },
+  sendTypingStatus: async (matchId, userId, typing) => {
+    const channel = get().channels[matchId];
+    if (!channel) return;
+    try {
+      await channel.send({
+        type: "broadcast",
+        event: typing ? "typing" : "typing_stop",
+        payload: { match_id: matchId, sender_id: userId },
+      });
+    } catch (error) {
+      console.warn("Failed to emit typing status", error);
+    }
+  },
+  setTypingState: (matchId, patch) => {
+    applyTypingPatch(matchId, patch);
   },
   setAutopilot: async (matchId, active) => {
     const previous = get().matches.find((match) => match.id === matchId)?.autopilot;
@@ -336,16 +496,18 @@ export const useMatches = create<MatchesState>((set, get) => ({
   },
   reset: () =>
     set((state) => {
-      if (state.messageChannel) {
-        supabase.removeChannel(state.messageChannel);
-      }
+      Object.values(state.channels).forEach((channel) => {
+        supabase.removeChannel(channel);
+      });
       return {
         matches: [],
         messages: {},
+        typing: {},
+        channels: {},
         isLoadingMatches: false,
         isLoadingMessages: {},
         viewerId: undefined,
-        messageChannel: null,
       };
     }),
-}));
+  };
+});

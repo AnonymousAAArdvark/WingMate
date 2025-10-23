@@ -24,6 +24,7 @@ export default function MatchesScreen() {
   const user = useAuth((state) => state.user);
   const loadMatches = useMatches((state) => state.load);
   const matches = useMatches((state) => state.matches);
+  const typingStates = useMatches((state) => state.typing);
   const [seedLookup, setSeedLookup] = useState<Record<string, SeedProfile>>({});
   const [profileLookup, setProfileLookup] = useState<Record<string, Profile>>({});
 
@@ -165,13 +166,28 @@ export default function MatchesScreen() {
           const partnerProfile = partnerId ? profileLookup[partnerId] : undefined;
           const name = seed?.name ?? partnerProfile?.name ?? "Match";
           const photo = seed?.photoURIs?.[0] ?? partnerProfile?.photoURIs?.[0];
-          const preview = item.lastMessageText
-            ? item.lastMessageText
-            : "Start the conversation and see where it goes.";
           const profileId = isSeed ? item.seedId ?? "" : partnerId ?? "";
           const unreadCount = item.unreadCount ?? 0;
           const isUnread = unreadCount > 0;
           const timestamp = item.lastMessageAt ?? item.createdAt;
+          const typingState = typingStates[item.id];
+          const partnerTyping = Boolean(typingState?.partnerTyping);
+          const partnerAutopilot = Boolean(typingState?.partnerAutopilot);
+          const selfAutopilot = Boolean(typingState?.selfAutopilot);
+          let preview = item.lastMessageText
+            ? item.lastMessageText
+            : "Start the conversation and see where it goes.";
+          let previewStyle = [styles.matchPreview, isUnread && styles.matchPreviewUnread];
+          if (partnerAutopilot) {
+            preview = "Autopilot drafting…";
+            previewStyle = [styles.matchPreview, styles.typingPreview];
+          } else if (partnerTyping) {
+            preview = "Typing…";
+            previewStyle = [styles.matchPreview, styles.typingPreview];
+          } else if (selfAutopilot) {
+            preview = "Your autopilot is drafting…";
+            previewStyle = [styles.matchPreview, styles.typingPreview];
+          }
 
           return (
             <TouchableOpacity
@@ -214,7 +230,7 @@ export default function MatchesScreen() {
                   )}
                 </View>
                 <Text
-                  style={[styles.matchPreview, isUnread && styles.matchPreviewUnread]}
+                  style={previewStyle}
                   numberOfLines={1}
                 >
                   {preview}
@@ -305,5 +321,9 @@ const styles = StyleSheet.create({
   timestampUnread: { color: "#ff4f81", fontWeight: "600" },
   matchPreview: { fontSize: 15, color: "#666", lineHeight: 20 },
   matchPreviewUnread: { color: "#333", fontWeight: "600" },
+  typingPreview: {
+    color: "#ff4f81",
+    fontWeight: "600",
+  },
   infoButton: { padding: 8 },
 });

@@ -132,50 +132,66 @@ serve(async (req) => {
     const messages = (messagesResult.data ?? []) as MessageRow[];
 
     // prevent double replies: cooldown and "already replied"
-    const lastAI = messages.filter((m) => m.is_seed === recipientIsSeed).at(-1);
+    const lastAI = messages
+      .filter((m) =>
+        recipientIsSeed ? m.is_seed === true : m.sender_id && m.sender_id === recipientId,
+      )
+      .at(-1);
     if (lastAI && new Date(lastAI.created_at).getTime() > Date.now() - 8000) {
       return jsonResponse({ message: "Autopilot cooldown active" }, 200);
     }
 
     const lastMessage = messages.at(-1);
-    if (!lastMessage || lastMessage.is_seed === recipientIsSeed) {
+    const lastMessageFromRecipient = recipientIsSeed
+      ? lastMessage?.is_seed === true
+      : lastMessage?.sender_id && recipientId
+        ? lastMessage.sender_id === recipientId
+        : false;
+
+    if (!lastMessage || lastMessageFromRecipient) {
       return jsonResponse({ message: "Autopilot already replied" }, 200);
     }
 
     // broadcast "partner is typing"
-    await broadcast(match_id, "autopilot_drafting", {
-      match_id,
-      sender_id: recipientId ?? "seed",
-    });
+    let startedTyping = false;
 
-    const reply = await generateReply({
-      recipientId,
-      recipientIsSeed,
-      seedProfile: seedResult.data as SeedProfile | null,
-      profiles: (profilesResult.data ?? []) as ProfileRow[],
-      messages,
-      match: match as MatchRow,
-    });
-    if (!reply) return jsonResponse({ message: "No reply generated" }, 200);
+    try {
+      await broadcast(match_id, "autopilot_drafting", {
+        match_id,
+        sender_id: recipientId ?? "seed",
+      });
+      startedTyping = true;
 
-    // longer, human-ish typing delay
-    const delay = Math.min(1500 + reply.length * 90, 10000);
-    await new Promise((r) => setTimeout(r, delay));
+      const reply = await generateReply({
+        recipientId,
+        recipientIsSeed,
+        seedProfile: seedResult.data as SeedProfile | null,
+        profiles: (profilesResult.data ?? []) as ProfileRow[],
+        messages,
+        match: match as MatchRow,
+      });
+      if (!reply) return jsonResponse({ message: "No reply generated" }, 200);
 
-    await supabase.from("messages").insert({
-      match_id,
-      sender_id: recipientIsSeed ? null : recipientId,
-      is_seed: recipientIsSeed,
-      text: reply,
-    });
+      // longer, human-ish typing delay
+      const delay = Math.min(1500 + reply.length * 90, 10000);
+      await new Promise((r) => setTimeout(r, delay));
 
-    // done typing
-    await broadcast(match_id, "autopilot_drafting_done", {
-      match_id,
-      sender_id: recipientId ?? "seed",
-    });
+      await supabase.from("messages").insert({
+        match_id,
+        sender_id: recipientIsSeed ? null : recipientId,
+        is_seed: recipientIsSeed,
+        text: reply,
+      });
 
-    return jsonResponse({ success: true });
+      return jsonResponse({ success: true });
+    } finally {
+      if (startedTyping) {
+        await broadcast(match_id, "autopilot_drafting_done", {
+          match_id,
+          sender_id: recipientId ?? "seed",
+        });
+      }
+    }
   } catch (err) {
     console.error("Autopilot Edge error:", err);
     return jsonResponse({ error: "Unexpected server error" }, 500);

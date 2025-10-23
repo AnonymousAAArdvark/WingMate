@@ -422,6 +422,7 @@ The new reply fires the trigger again—if the other participant has autopilot e
      --project-ref <your-project-ref>
    ```
    Source lives in `supabase/functions/autopilot-handler`.
+   Redeploy this function whenever you pull updates so the latest autopilot logic is active.
 
 2. **Expose the edge-function secret to Postgres**
    ```sql
