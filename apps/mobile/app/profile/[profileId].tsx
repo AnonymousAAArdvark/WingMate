@@ -1,267 +1,217 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Image,
+  Dimensions,
   ScrollView,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { supabase } from "../../src/lib/supabase";
+import { mapProfileRow, mapSeedProfile } from "../../src/lib/mappers";
 import HobbyChips from "../../src/components/HobbyChips";
 import PromptList from "../../src/components/PromptList";
-import type { Profile, SeedProfile } from "../../src/lib/types";
-import { mapProfileRow, mapSeedProfile } from "../../src/lib/mappers";
-import { supabase } from "../../src/lib/supabase";
+import PhotoCarousel from "../../src/components/PhotoCarousel";
+
+// Keep native header hidden (custom header only)
+export const options = { headerShown: false };
+
+const PINK = "#ff4f81";
+
+type RouteParams = { profileId?: string; kind?: "seed" | "user" };
 
 export default function ProfilePreviewScreen() {
   const router = useRouter();
-  const { profileId, kind } = useLocalSearchParams<{ profileId?: string; kind?: string }>();
+  const { profileId, kind } = useLocalSearchParams<RouteParams>();
   const [loading, setLoading] = useState(true);
+  const [profile, setProfile] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
-  const [profile, setProfile] = useState<(Profile | SeedProfile) | null>(null);
-  const [profileKind, setProfileKind] = useState<"seed" | "user">("user");
 
-  useEffect(() => {
+  const width = Dimensions.get("window").width;
+  const heroWidth = Math.min(width - 24, 480);
+  const heroHeight = Math.round(heroWidth * 0.9);
+
+  const load = useCallback(async () => {
     if (!profileId) return;
-    let cancelled = false;
-
-    const load = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        if (kind === "seed") {
-          const { data, error: seedError } = await supabase
-            .from("seed_profiles")
-            .select(
-              "seed_id, display_name, age, bio, persona_seed, prompts, hobbies, photo_url, is_active",
-            )
-            .eq("seed_id", profileId)
-            .maybeSingle();
-
-          if (seedError) throw seedError;
-          if (!data) {
-            setProfile(null);
-            return;
-          }
-          if (cancelled) return;
-          setProfile(mapSeedProfile(data));
-          setProfileKind("seed");
-        } else {
-          const { data, error: profileError } = await supabase
-            .from("profiles")
-            .select(
-              "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
-            )
-            .eq("id", profileId)
-            .maybeSingle();
-
-          if (profileError) throw profileError;
-          if (!data) {
-            setProfile(null);
-            return;
-          }
-          if (cancelled) return;
-          setProfile(mapProfileRow(data));
-          setProfileKind("user");
-        }
-      } catch (err: any) {
-        if (!cancelled) {
-          setError(err?.message ?? "Unable to load profile.");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+    setLoading(true);
+    setError(null);
+    try {
+      if (kind === "seed") {
+        const { data, error: e } = await supabase
+          .from("seed_profiles")
+          .select(
+            "seed_id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity, is_active",
+          )
+          .eq("seed_id", profileId)
+          .maybeSingle();
+        if (e) throw e;
+        setProfile(data ? mapSeedProfile(data) : null);
+      } else {
+        const { data, error: e } = await supabase
+          .from("profiles")
+          .select(
+            "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity",
+          )
+          .eq("id", profileId)
+          .maybeSingle();
+        if (e) throw e;
+        setProfile(data ? mapProfileRow(data) : null);
       }
-    };
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [kind, profileId]);
-
-  const handleClose = () => {
-    router.back();
-  };
-
-  const renderPhoto = () => {
-    if (!profile) return null;
-    const uri = "photoURIs" in profile ? profile.photoURIs?.[0] : undefined;
-    if (uri) {
-      return <Image source={{ uri }} style={styles.heroPhoto} />;
+    } catch (err: any) {
+      setError(err?.message ?? "Unable to load profile.");
+    } finally {
+      setLoading(false);
     }
-    const fallbackName = profile.name ?? "?";
-    return (
-      <View style={[styles.heroPhoto, styles.photoFallback]}>
-        <Text style={styles.photoFallbackText}>{fallbackName.slice(0, 1).toUpperCase()}</Text>
-      </View>
-    );
-  };
+  }, [profileId, kind]);
 
-  const name = profile?.name ?? "Profile";
-  const age = profile?.age ? `, ${profile.age}` : "";
-  const personaSeed = profile?.personaSeed ?? "";
+  useEffect(() => { load(); }, [load]);
+
+  const formattedGender = useMemo(() => {
+    if (!profile?.gender) return undefined;
+    switch (profile.gender) {
+      case "woman": return "Woman";
+      case "man": return "Man";
+      case "nonbinary": return "Non-binary";
+      default: return "Other";
+    }
+  }, [profile?.gender]);
+
+  const metaDetails = useMemo(() => {
+    if (!profile) return "";
+    const parts: string[] = [];
+    if (profile.age) parts.push(`${profile.age}`);
+    if (formattedGender) parts.push(formattedGender);
+    if (profile.heightCm) parts.push(`${profile.heightCm} cm`);
+    if (profile.ethnicity) parts.push(profile.ethnicity);
+    return parts.join(" • ");
+  }, [profile, formattedGender]);
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.centered} edges={["top", "left", "right"]}>
+        <ActivityIndicator size="large" color={PINK} />
+      </SafeAreaView>
+    );
+  }
+  if (error || !profile) {
+    return (
+      <SafeAreaView style={styles.centered} edges={["top", "left", "right"]}>
+        <Text style={styles.errorText}>{error ?? "We couldn’t find that profile."}</Text>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+          <Ionicons name="chevron-back" size={18} color={PINK} />
+          <Text style={styles.backText}>Back</Text>
+        </TouchableOpacity>
+      </SafeAreaView>
+    );
+  }
+
+  const photos = profile.photoURIs?.length ? profile.photoURIs : [undefined];
 
   return (
-    <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color="#ff4f81" />
-        </View>
-      ) : error ? (
-        <View style={styles.centered}>
-          <Text style={styles.errorText}>{error}</Text>
-        </View>
-      ) : !profile ? (
-        <View style={styles.centered}>
-          <Text style={styles.errorText}>We couldn’t find that profile.</Text>
-        </View>
-      ) : (
-        <ScrollView contentContainerStyle={styles.content}>
-          <View style={styles.header}>{renderPhoto()}</View>
-          <View style={styles.titleRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.title}>{`${name}${age}`}</Text>
-              {profile.bio ? (
-                <Text style={styles.bio}>{profile.bio}</Text>
-              ) : null}
-            </View>
-            {profile.isPro ? (
-              <View style={styles.badge}>
-                <Text style={styles.badgeText}>Autopilot</Text>
-              </View>
-            ) : null}
+    <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
+      {/* Single custom header */}
+      <View style={styles.headerBar}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.headerBack}>
+          <Ionicons name="chevron-back" size={28} color={PINK} />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Profile</Text>
+        <View style={{ width: 28 }} />
+      </View>
+
+      <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+        {/* Rounded carousel with border radius */}
+        <View style={styles.heroWrap}>
+          <View style={styles.heroRounded}>
+            <PhotoCarousel photos={photos} width={heroWidth} height={heroHeight} enableSwipe />
           </View>
-          {personaSeed ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Persona</Text>
-              <Text style={styles.sectionBodyText}>{personaSeed}</Text>
-            </View>
-          ) : null}
-          {profile.hobbies?.length ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Hobbies</Text>
-              <HobbyChips hobbies={profile.hobbies} />
-            </View>
-          ) : null}
-          {profile.prompts?.length ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Prompts</Text>
-              <PromptList prompts={profile.prompts} />
-            </View>
-          ) : null}
-          <View style={styles.footerNote}>
-            <Text style={styles.footerText}>
-              {profileKind === "seed"
-                ? "This is a Wingmate autopilot persona."
-                : "Shared from a Wingmate member."}
-            </Text>
-            <Text style={styles.closeLink} onPress={handleClose}>
-              Close
-            </Text>
+        </View>
+
+        <View style={styles.headerBlock}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.name}>{profile.name}</Text>
+            {metaDetails ? <Text style={styles.meta}>{metaDetails}</Text> : null}
           </View>
-        </ScrollView>
-      )}
+        </View>
+
+        {profile.bio ? <Text style={styles.bio}>{profile.bio}</Text> : null}
+
+        {profile.hobbies?.length ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Interests</Text>
+            <HobbyChips hobbies={profile.hobbies} />
+          </View>
+        ) : null}
+
+        {profile.prompts?.length ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Prompts</Text>
+            <PromptList prompts={profile.prompts} />
+          </View>
+        ) : null}
+
+        {profile.personaSeed ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Persona</Text>
+            <Text style={styles.personaText}>{profile.personaSeed}</Text>
+          </View>
+        ) : null}
+
+        <View style={{ height: 28 }} />
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#fff",
-  },
-  centered: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-  content: {
-    paddingBottom: 32,
-  },
-  header: {
-    padding: 20,
-  },
-  heroPhoto: {
-    width: "100%",
-    height: 320,
-    borderRadius: 24,
-    backgroundColor: "#f5f5f5",
-  },
-  photoFallback: {
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  photoFallbackText: {
-    fontSize: 56,
-    fontWeight: "700",
-    color: "#ff4f81",
-  },
-  titleRow: {
+  container: { flex: 1, backgroundColor: "#fff" },
+
+  // Single custom header
+  headerBar: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    gap: 16,
+    paddingHorizontal: 8,
+    paddingBottom: 8,
+    paddingTop: 12,
+    backgroundColor: "#fff",
   },
-  title: {
-    fontSize: 28,
-    fontWeight: "700",
-    color: "#111",
-  },
-  bio: {
-    marginTop: 8,
-    fontSize: 16,
-    color: "#444",
-    lineHeight: 22,
-  },
-  badge: {
-    borderRadius: 999,
-    backgroundColor: "#ffedf3",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  badgeText: {
-    color: "#ff4f81",
-    fontWeight: "600",
-  },
-  section: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    gap: 8,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: "#222",
-  },
-  sectionBodyText: {
-    fontSize: 15,
-    color: "#555",
-    lineHeight: 22,
-  },
-  footerNote: {
-    paddingHorizontal: 20,
-    paddingTop: 32,
-    gap: 12,
+  headerBack: { padding: 8, marginRight: 6 },
+  headerTitle: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "700", color: "#111" },
+
+  body: { paddingBottom: 28 },
+  heroWrap: { paddingHorizontal: 12, paddingTop: 8, alignItems: "center" },
+  heroRounded: { borderRadius: 24, overflow: "hidden" }, // border radius on carousel
+
+  headerBlock: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 6,
+    flexDirection: "row",
     alignItems: "flex-start",
+    gap: 12,
   },
-  footerText: {
-    color: "#777",
-    fontSize: 13,
+  name: { fontSize: 28, fontWeight: "800", color: "#111" },
+  meta: { fontSize: 14, color: "#777", marginTop: 6 },
+
+  bio: { paddingHorizontal: 16, paddingTop: 8, fontSize: 16, color: "#333", lineHeight: 22 },
+  section: { paddingHorizontal: 16, paddingTop: 16, gap: 10 },
+  sectionTitle: { fontSize: 16, fontWeight: "700", color: "#111" },
+  personaText: { fontSize: 15, color: "#444", lineHeight: 22 },
+
+  centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 16, backgroundColor: "#fff" },
+  errorText: { fontSize: 16, color: "#c11d4a", textAlign: "center" },
+  backBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderColor: PINK,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
   },
-  closeLink: {
-    color: "#ff4f81",
-    fontWeight: "600",
-    fontSize: 15,
-  },
-  errorText: {
-    color: "#c11d4a",
-    fontSize: 16,
-    textAlign: "center",
-  },
+  backText: { color: PINK, fontWeight: "600", fontSize: 14 },
 });

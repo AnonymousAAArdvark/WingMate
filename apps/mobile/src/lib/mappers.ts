@@ -1,4 +1,4 @@
-import type { Profile, SeedProfile } from "./types";
+import type { GenderPreference, Profile, SeedProfile } from "./types";
 
 export const mapSeedProfile = (row: any): SeedProfile => ({
   isSeed: true,
@@ -10,8 +10,12 @@ export const mapSeedProfile = (row: any): SeedProfile => ({
   bio: row.bio ?? "",
   prompts: row.prompts ?? [],
   hobbies: row.hobbies ?? [],
-  photoURIs: row.photo_url ? [row.photo_url] : [],
+  photoURIs: row.photo_urls ?? (row.photo_url ? [row.photo_url] : []),
   personaSeed: row.persona_seed ?? "Playful and curious.",
+  gender: row.gender ?? "other",
+  genderPreference: (row.gender_preference as GenderPreference) ?? "everyone",
+  heightCm: row.height_cm ?? undefined,
+  ethnicity: row.ethnicity ?? undefined,
 });
 
 export const mapProfileRow = (row: any): Profile => ({
@@ -23,5 +27,9 @@ export const mapProfileRow = (row: any): Profile => ({
   prompts: row.prompts ?? [],
   hobbies: row.hobbies ?? [],
   photoURIs: row.photo_urls ?? [],
+  gender: row.gender ?? "other",
+  genderPreference: (row.gender_preference as GenderPreference) ?? "everyone",
+  heightCm: row.height_cm ?? undefined,
+  ethnicity: row.ethnicity ?? undefined,
   isPro: row.is_pro ?? false,
 });

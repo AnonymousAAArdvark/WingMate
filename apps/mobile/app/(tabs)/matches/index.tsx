@@ -24,16 +24,14 @@ export default function MatchesScreen() {
   const user = useAuth((state) => state.user);
   const loadMatches = useMatches((state) => state.load);
   const matches = useMatches((state) => state.matches);
-  const messagesMap = useMatches((state) => state.messages);
   const [seedLookup, setSeedLookup] = useState<Record<string, SeedProfile>>({});
   const [profileLookup, setProfileLookup] = useState<Record<string, Profile>>({});
-  const [unreadMatches, setUnreadMatches] = useState<Set<string>>(new Set());
 
   const fetchSeeds = useCallback(async () => {
     const { data, error } = await supabase
       .from("seed_profiles")
       .select(
-        "seed_id, display_name, age, bio, persona_seed, prompts, hobbies, photo_url, is_active",
+        "seed_id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity, is_active",
       )
       .eq("is_active", true);
 
@@ -50,33 +48,14 @@ export default function MatchesScreen() {
     setSeedLookup(next);
   }, []);
 
-  useEffect(() => {
-    if (!user?.id) return;
-
-    const checkUnread = async () => {
-      const unread = new Set<string>();
-      for (const match of matches) {
-        const messages = messagesMap[match.id] ?? [];
-        const lastMessage = messages[messages.length - 1];
-        if (lastMessage && lastMessage.fromUserId !== user.id) unread.add(match.id);
-      }
-      setUnreadMatches(unread);
-    };
-
-    checkUnread();
-  }, [matches, messagesMap, user?.id]);
 
   const sortedMatches = useMemo(() => {
     return [...matches].sort((a, b) => {
-      const messagesA = messagesMap[a.id] ?? [];
-      const messagesB = messagesMap[b.id] ?? [];
-      const lastA = messagesA[messagesA.length - 1];
-      const lastB = messagesB[messagesB.length - 1];
-      const timeA = lastA?.createdAt ? new Date(lastA.createdAt).getTime() : 0;
-      const timeB = lastB?.createdAt ? new Date(lastB.createdAt).getTime() : 0;
+      const timeA = a.lastMessageAt ?? a.createdAt;
+      const timeB = b.lastMessageAt ?? b.createdAt;
       return timeB - timeA;
     });
-  }, [matches, messagesMap]);
+  }, [matches]);
 
   useFocusEffect(
     useCallback(() => {
@@ -107,7 +86,7 @@ export default function MatchesScreen() {
       const { data, error } = await supabase
         .from("profiles")
         .select(
-          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
+          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity, is_pro",
         )
         .in("id", partnerIds);
 
@@ -141,7 +120,7 @@ export default function MatchesScreen() {
     [router],
   );
 
-  const formatTimestamp = (timestamp: string | undefined) => {
+  const formatTimestamp = (timestamp: number | undefined) => {
     if (!timestamp) return "";
     const date = new Date(timestamp);
     const now = new Date();
@@ -186,14 +165,13 @@ export default function MatchesScreen() {
           const partnerProfile = partnerId ? profileLookup[partnerId] : undefined;
           const name = seed?.name ?? partnerProfile?.name ?? "Match";
           const photo = seed?.photoURIs?.[0] ?? partnerProfile?.photoURIs?.[0];
-          const messages = messagesMap[item.id] ?? [];
-          const lastMessage = messages[messages.length - 1];
-          const preview = lastMessage
-            ? lastMessage.text
+          const preview = item.lastMessageText
+            ? item.lastMessageText
             : "Start the conversation and see where it goes.";
           const profileId = isSeed ? item.seedId ?? "" : partnerId ?? "";
-          const isUnread = unreadMatches.has(item.id);
-          const timestamp = lastMessage?.createdAt;
+          const unreadCount = item.unreadCount ?? 0;
+          const isUnread = unreadCount > 0;
+          const timestamp = item.lastMessageAt ?? item.createdAt;
 
           return (
             <TouchableOpacity
@@ -215,7 +193,13 @@ export default function MatchesScreen() {
                     </Text>
                   </View>
                 )}
-                {isUnread && <View style={styles.unreadDot} />}
+                {isUnread ? (
+                  <View style={styles.unreadBadge}>
+                    <Text style={styles.unreadBadgeText}>
+                      {unreadCount > 9 ? "9+" : unreadCount}
+                    </Text>
+                  </View>
+                ) : null}
               </View>
 
               <View style={styles.matchContent}>
@@ -291,16 +275,22 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   avatarInitial: { fontSize: 22, fontWeight: "700", color: "#ff4f81" },
-  unreadDot: {
+  unreadBadge: {
     position: "absolute",
-    top: -2,
-    right: -2,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+    top: -6,
+    right: -6,
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
     backgroundColor: "#ff4f81",
-    borderWidth: 3,
-    borderColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+  },
+  unreadBadgeText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "700",
   },
   matchContent: { flex: 1, gap: 4 },
   matchHeader: {

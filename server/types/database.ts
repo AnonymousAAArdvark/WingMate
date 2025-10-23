@@ -12,6 +12,10 @@ export type ProfileRow = {
   prompts: SeedPrompt[] | null;
   hobbies: string[] | null;
   photo_urls: string[] | null;
+  gender: string | null;
+  gender_preference: string | null;
+  height_cm: number | null;
+  ethnicity: string | null;
   is_pro: boolean | null;
 };
 
@@ -23,7 +27,11 @@ export type SeedProfileRow = {
   persona_seed: string | null;
   prompts: SeedPrompt[] | null;
   hobbies: string[] | null;
-  photo_url: string | null;
+  photo_urls: string[] | null;
+  gender: string | null;
+  gender_preference: string | null;
+  height_cm: number | null;
+  ethnicity: string | null;
   is_active: boolean;
 };
 

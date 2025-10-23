@@ -4,8 +4,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL") ?? "gpt-4o-mini";
-const SUPABASE_URL = Deno.env.get("SB_URL");
-const SERVICE_ROLE_KEY = Deno.env.get("SB_SERVICE_ROLE_KEY");
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? Deno.env.get("SB_URL");
+const SERVICE_ROLE_KEY =
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? Deno.env.get("SB_SERVICE_ROLE_KEY");
 
 const DEFAULT_SEED_PERSONA = "Warm, curious, and upbeat.";
 const DEFAULT_HUMAN_PERSONA = "Warm, proactive, and excited to lock in a simple date plan.";
@@ -109,13 +110,17 @@ serve(async (req) => {
       seedId
         ? supabase
             .from("seed_profiles")
-            .select("seed_id, display_name, bio, persona_seed, prompts, hobbies, photo_url")
+            .select(
+              "seed_id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity",
+            )
             .eq("seed_id", seedId)
             .maybeSingle()
         : Promise.resolve({ data: null }),
       supabase
         .from("profiles")
-        .select("id, display_name, bio, persona_seed, prompts, hobbies, photo_urls, is_pro")
+        .select(
+          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity, is_pro",
+        )
         .in("id", [match.user_a, match.user_b].filter(Boolean) as string[]),
       supabase
         .from("messages")
@@ -188,21 +193,31 @@ function jsonResponse(body: unknown, status = 200): Response {
 type SeedProfile = {
   seed_id: string;
   display_name: string;
-  bio: string | null;
-  persona_seed: string | null;
-  prompts: { question: string; answer: string }[] | null;
-  hobbies: string[] | null;
-  photo_url: string | null;
-};
-
-type ProfileRow = {
-  id: string;
-  display_name: string | null;
+  age: number | null;
   bio: string | null;
   persona_seed: string | null;
   prompts: { question: string; answer: string }[] | null;
   hobbies: string[] | null;
   photo_urls: string[] | null;
+  gender: string | null;
+  gender_preference: string | null;
+  height_cm: number | null;
+  ethnicity: string | null;
+};
+
+type ProfileRow = {
+  id: string;
+  display_name: string | null;
+  age: number | null;
+  bio: string | null;
+  persona_seed: string | null;
+  prompts: { question: string; answer: string }[] | null;
+  hobbies: string[] | null;
+  photo_urls: string[] | null;
+  gender: string | null;
+  gender_preference: string | null;
+  height_cm: number | null;
+  ethnicity: string | null;
   is_pro: boolean | null;
 };
 
@@ -285,18 +300,28 @@ async function generateReply(args: {
 // === Utilities ===
 type ProfileSummary = {
   name?: string;
+  age?: number;
+  gender?: string;
+  genderPreference?: string;
   bio?: string;
   prompts?: { question: string; answer: string }[] | null;
   hobbies?: string[] | null;
+  heightCm?: number | null;
+  ethnicity?: string | null;
 };
 
 function summary(profile: SeedProfile | ProfileRow | null): ProfileSummary | null {
   if (!profile) return null;
   return {
     name: "display_name" in profile ? (profile.display_name ?? undefined) : undefined,
+    age: (profile as any).age ?? undefined,
+    gender: (profile as any).gender ?? undefined,
+    genderPreference: (profile as any).gender_preference ?? undefined,
     bio: (profile as any).bio ?? undefined,
     prompts: (profile as any).prompts ?? null,
     hobbies: (profile as any).hobbies ?? null,
+    heightCm: (profile as any).height_cm ?? undefined,
+    ethnicity: (profile as any).ethnicity ?? undefined,
   };
 }
 
@@ -304,10 +329,15 @@ function describeSummary(label: string, profile: ProfileSummary | null): string 
   if (!profile) return `${label}: (none provided)`;
   const parts: string[] = [];
   if (profile.name) parts.push(`name: ${profile.name}`);
+  if (profile.age) parts.push(`age: ${profile.age}`);
+  if (profile.gender) parts.push(`gender: ${profile.gender}`);
+  if (profile.genderPreference) parts.push(`interested in: ${profile.genderPreference}`);
   if (profile.bio) parts.push(`bio: ${profile.bio}`);
   if (profile.hobbies?.length) parts.push(`hobbies: ${profile.hobbies.join(", ")}`);
   if (profile.prompts?.length)
     parts.push(`prompts: ${profile.prompts.slice(0, 4).map((p) => `${p.question}: ${p.answer}`).join(" | ")}`);
+  if (typeof profile.heightCm === "number") parts.push(`height: ${profile.heightCm}cm`);
+  if (profile.ethnicity) parts.push(`ethnicity: ${profile.ethnicity}`);
   return `${label}: ${parts.join("; ") || "(none provided)"}`;
 }
 

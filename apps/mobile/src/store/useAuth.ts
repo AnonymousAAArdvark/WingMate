@@ -64,21 +64,6 @@ export const useAuth = create<AuthState>((set) => {
       if (error) {
         throw error;
       }
-      if (data.user) {
-        await supabase
-          .from("profiles")
-          .upsert({
-            id: data.user.id,
-            display_name: "",
-            bio: "",
-            persona_seed: "Friendly and curious.",
-            prompts: [],
-            hobbies: [],
-            photo_urls: [],
-            is_pro: false,
-          })
-          .throwOnError();
-      }
       set({
         session: data.session ?? null,
         user: data.user ?? null,

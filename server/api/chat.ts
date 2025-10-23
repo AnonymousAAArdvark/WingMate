@@ -2,7 +2,6 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { config as loadEnv } from "dotenv";
-import { randomUUID } from "crypto";
 import { supabase } from "../lib/supabase";
 import type {
   MatchRow,
@@ -22,9 +21,14 @@ const client = new OpenAI({
 
 type ProfileSummary = {
   name?: string;
+  age?: number;
+  gender?: string;
+  genderPreference?: string;
   bio?: string;
   prompts?: SeedProfileRow["prompts"];
   hobbies?: string[];
+  heightCm?: number | null;
+  ethnicity?: string | null;
 };
 
 type ConversationFragment = {
@@ -51,13 +55,6 @@ type AutopilotDraftRequest = {
 type ChatRequestBody = MatchChatRequest | AutopilotDraftRequest;
 
 const fallbackReply = "That sounds fun—want to pick a time?";
-// Delay helpers to simulate realistic reading/typing gaps
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-function calculateDelay(messageText: string): number {
-  const baseDelay = 1000 + Math.random() * 1000; // 1–2s reading
-  const typingDelay = (messageText.length / 4) * 1000; // ~4 chars/sec
-  return Math.min(baseDelay + typingDelay, 5000); // cap at 5s
-}
 
 function describeProfile(
   label: string,
@@ -72,12 +69,35 @@ function describeProfile(
         ? profile.name ?? null
         : null;
   const bio = "bio" in profile ? profile.bio ?? "" : "";
+  const age = "age" in profile ? (profile as any).age ?? null : null;
+  const gender = "gender" in profile ? (profile as any).gender ?? null : null;
+  const genderPref =
+    "gender_preference" in profile
+      ? (profile as any).gender_preference ?? null
+      : "genderPreference" in profile
+        ? (profile as ProfileSummary).genderPreference ?? null
+        : null;
+  const height =
+    "height_cm" in profile
+      ? (profile as any).height_cm ?? null
+      : "heightCm" in profile
+        ? (profile as ProfileSummary).heightCm ?? null
+        : null;
+  const ethnicity =
+    "ethnicity" in profile
+      ? (profile as any).ethnicity ?? null
+      : "ethnicity" in profile
+        ? (profile as ProfileSummary).ethnicity ?? null
+        : null;
   const personaSeed =
     "persona_seed" in profile ? profile.persona_seed ?? "" : undefined;
   const prompts = profile.prompts ?? [];
   const hobbies = profile.hobbies ?? [];
 
   if (name) descriptors.push(`name: ${name}`);
+  if (age) descriptors.push(`age: ${age}`);
+  if (gender) descriptors.push(`gender: ${gender}`);
+  if (genderPref) descriptors.push(`interested in: ${genderPref}`);
   if (bio) descriptors.push(`bio: ${bio}`);
   if (hobbies.length) {
     descriptors.push(`hobbies: ${hobbies.join(", ")}`);
@@ -92,6 +112,12 @@ function describeProfile(
   }
   if (personaSeed) {
     descriptors.push(`persona_seed: ${personaSeed}`);
+  }
+  if (height) {
+    descriptors.push(`height: ${height}cm`);
+  }
+  if (ethnicity) {
+    descriptors.push(`ethnicity: ${ethnicity}`);
   }
 
   return `${label}: ${descriptors.join("; ") || "(none provided)"}`;
@@ -119,9 +145,14 @@ function toProfileSummaryFromRow(
 ): ProfileSummary {
   return {
     name: profile?.display_name ?? undefined,
+    age: (profile as any)?.age ?? undefined,
+    gender: (profile as any)?.gender ?? undefined,
+    genderPreference: (profile as any)?.gender_preference ?? undefined,
     bio: profile?.bio ?? undefined,
     prompts: profile?.prompts ?? undefined,
     hobbies: profile?.hobbies ?? undefined,
+    heightCm: (profile as any)?.height_cm ?? undefined,
+    ethnicity: (profile as any)?.ethnicity ?? undefined,
   };
 }
 

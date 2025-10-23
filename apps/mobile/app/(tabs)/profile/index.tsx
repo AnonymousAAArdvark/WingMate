@@ -14,15 +14,48 @@ import {
 import * as ImagePicker from "expo-image-picker";
 import { useFocusEffect } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import type { Profile, ProfilePrompt } from "../../../src/lib/types";
+import type {
+  Gender,
+  GenderPreference,
+  Profile,
+  ProfilePrompt,
+} from "../../../src/lib/types";
 import { useAuth } from "../../../src/store/useAuth";
 import { useProfile } from "../../../src/store/useProfile";
 import { useMatches } from "../../../src/store/useMatches";
+import { uploadProfilePhoto } from "../../../src/lib/storage";
+import {
+  formatProfileValidation,
+  validateProfile,
+} from "../../../src/lib/profileValidation";
 
 export const options = {
   title: "Profile",
 };
+
+type PhotoDraft = {
+  id: string;
+  uri: string;
+  remoteUrl?: string;
+  fileName?: string;
+  mimeType?: string | null;
+  uploaded?: boolean;
+};
+
 const emptyPrompt: ProfilePrompt = { question: "", answer: "" };
+
+const GENDER_OPTIONS: { label: string; value: Gender }[] = [
+  { label: "Woman", value: "woman" },
+  { label: "Man", value: "man" },
+  { label: "Non-binary", value: "nonbinary" },
+  { label: "Other", value: "other" },
+];
+
+const PREFERENCE_OPTIONS: { label: string; value: GenderPreference }[] = [
+  { label: "Women", value: "women" },
+  { label: "Men", value: "men" },
+  { label: "Everyone", value: "everyone" },
+];
 
 const normalizePrompts = (items: ProfilePrompt[]) =>
   items
@@ -30,7 +63,8 @@ const normalizePrompts = (items: ProfilePrompt[]) =>
       question: item.question.trim(),
       answer: item.answer.trim(),
     }))
-    .filter((item) => item.question && item.answer);
+    .filter((item) => item.question && item.answer)
+    .slice(0, 3);
 
 const canonicalProfileShape = (profile: Profile) => ({
   name: profile.name.trim(),
@@ -40,6 +74,10 @@ const canonicalProfileShape = (profile: Profile) => ({
   prompts: normalizePrompts(profile.prompts),
   hobbies: profile.hobbies.map((hobby) => hobby.trim()).filter(Boolean),
   photoURIs: profile.photoURIs,
+  gender: profile.gender,
+  genderPreference: profile.genderPreference,
+  heightCm: profile.heightCm ?? undefined,
+  ethnicity: profile.ethnicity?.trim() ?? undefined,
   isPro: profile.isPro,
 });
 
@@ -61,8 +99,15 @@ export default function ProfileScreen() {
   const [bio, setBio] = useState("");
   const [personaSeed, setPersonaSeed] = useState("");
   const [hobbiesText, setHobbiesText] = useState("");
-  const [photos, setPhotos] = useState<string[]>([]);
+  const [gender, setGender] = useState<Gender>("other");
+  const [genderPreference, setGenderPreference] =
+    useState<GenderPreference>("everyone");
+  const [height, setHeight] = useState("");
+  const [ethnicity, setEthnicity] = useState("");
+  const [photoDrafts, setPhotoDrafts] = useState<PhotoDraft[]>([]);
   const [prompts, setPrompts] = useState<ProfilePrompt[]>([emptyPrompt]);
+  const [validationMessage, setValidationMessage] = useState<string | null>(null);
+  const [isUploadingPhotos, setIsUploadingPhotos] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -73,18 +118,44 @@ export default function ProfileScreen() {
   );
 
   useEffect(() => {
-    if (!profile) return;
+    if (!profile) {
+      setName("");
+      setAge("");
+      setBio("");
+      setPersonaSeed("");
+      setHobbiesText("");
+      setGender("other");
+      setGenderPreference("everyone");
+      setHeight("");
+      setEthnicity("");
+      setPhotoDrafts([]);
+      setPrompts([emptyPrompt]);
+      setValidationMessage(null);
+      return;
+    }
     setName(profile.name);
     setAge(profile.age ? String(profile.age) : "");
     setBio(profile.bio);
     setPersonaSeed(profile.personaSeed);
     setHobbiesText(profile.hobbies.join(", "));
-    setPhotos(profile.photoURIs);
+    setGender(profile.gender);
+    setGenderPreference(profile.genderPreference);
+    setHeight(profile.heightCm ? String(profile.heightCm) : "");
+    setEthnicity(profile.ethnicity ?? "");
+    setPhotoDrafts(
+      profile.photoURIs.map((uri, index) => ({
+        id: `remote-${index}-${uri}`,
+        uri,
+        remoteUrl: uri,
+        uploaded: true,
+      })),
+    );
     setPrompts(
       profile.prompts.length
         ? profile.prompts.map((prompt) => ({ ...prompt }))
         : [emptyPrompt],
     );
+    setValidationMessage(null);
   }, [profile]);
 
   const draftProfile = useMemo<Profile>(() => {
@@ -95,6 +166,8 @@ export default function ProfileScreen() {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
+    const parsedHeight = height.trim() ? Number(height.trim()) : undefined;
+    const safeHeight = Number.isNaN(parsedHeight) ? undefined : parsedHeight;
 
     return {
       userId: auth?.id ?? profile?.userId ?? "",
@@ -104,10 +177,29 @@ export default function ProfileScreen() {
       personaSeed: trimmedPersona,
       prompts: normalizePrompts(prompts),
       hobbies: normalizedHobbies,
-      photoURIs: photos,
+      photoURIs: photoDrafts.map((photo) => photo.remoteUrl ?? photo.uri),
+      gender,
+      genderPreference,
+      heightCm: safeHeight,
+      ethnicity: ethnicity.trim() ? ethnicity.trim() : undefined,
       isPro: profile?.isPro ?? false,
     };
-  }, [age, auth?.id, bio, hobbiesText, name, personaSeed, photos, profile?.isPro, profile?.userId, prompts]);
+  }, [
+    age,
+    auth?.id,
+    bio,
+    ethnicity,
+    gender,
+    genderPreference,
+    height,
+    hobbiesText,
+    name,
+    personaSeed,
+    photoDrafts,
+    profile?.isPro,
+    profile?.userId,
+    prompts,
+  ]);
 
   const hasChanges = useMemo(() => {
     if (!profile) return true;
@@ -117,25 +209,74 @@ export default function ProfileScreen() {
     );
   }, [draftProfile, profile]);
 
+  const ensureRemotePhotos = useCallback(async () => {
+    if (!auth?.id) {
+      throw new Error("Sign in to update photos.");
+    }
+    if (photoDrafts.length === 0) {
+      return [] as string[];
+    }
+    const updated: PhotoDraft[] = [];
+    for (const photo of photoDrafts) {
+      if (photo.remoteUrl && photo.uploaded !== false) {
+        updated.push({ ...photo, uploaded: true, uri: photo.remoteUrl });
+        continue;
+      }
+      const uploadResult = await uploadProfilePhoto({
+        userId: auth.id,
+        uri: photo.uri,
+        fileName: photo.fileName,
+        mimeType: photo.mimeType ?? undefined,
+      });
+      updated.push({
+        ...photo,
+        uploaded: true,
+        remoteUrl: uploadResult.publicUrl,
+        uri: uploadResult.publicUrl,
+      });
+    }
+    setPhotoDrafts(updated);
+    return updated.map((item) => item.remoteUrl ?? item.uri);
+  }, [auth?.id, photoDrafts]);
+
   const handleSave = async () => {
     if (!auth) return;
-    if (!draftProfile.name || !draftProfile.bio) {
-      Alert.alert("Missing info", "Name and bio are required.");
-      return;
-    }
+
     if (age.trim() && Number.isNaN(Number(age.trim()))) {
       Alert.alert("Invalid age", "Age must be a valid number.");
       return;
     }
+    if (height.trim() && Number.isNaN(Number(height.trim()))) {
+      Alert.alert("Invalid height", "Height must be a number in centimeters.");
+      return;
+    }
+
+    const validation = validateProfile(draftProfile);
+    if (!validation.isComplete) {
+      const message = formatProfileValidation(validation);
+      setValidationMessage(message);
+      Alert.alert("Profile incomplete", message);
+      return;
+    }
 
     try {
-      await saveProfile({
+      setValidationMessage(null);
+      setIsUploadingPhotos(true);
+      const remotePhotoURIs = await ensureRemotePhotos();
+      const nextProfile: Profile = {
         ...draftProfile,
+        photoURIs: remotePhotoURIs,
         personaSeed: draftProfile.personaSeed || "Friendly and curious.",
-      });
+      };
+      await saveProfile(nextProfile);
       Alert.alert("Profile saved", "Your profile was updated.");
     } catch (error: any) {
-      Alert.alert("Save failed", error?.message ?? "We couldn’t save your profile.");
+      const message =
+        error?.message ?? "We couldn’t save your profile. Please try again.";
+      setValidationMessage(message);
+      Alert.alert("Save failed", message);
+    } finally {
+      setIsUploadingPhotos(false);
     }
   };
 
@@ -144,7 +285,10 @@ export default function ProfileScreen() {
     try {
       await setPro(auth.id, value);
     } catch (error: any) {
-      Alert.alert("Autopilot", error?.message ?? "Unable to update your plan right now.");
+      Alert.alert(
+        "Autopilot",
+        error?.message ?? "Unable to update your plan right now.",
+      );
     }
   };
 
@@ -155,7 +299,13 @@ export default function ProfileScreen() {
   };
 
   const handleAddPrompt = () => {
-    setPrompts((prev) => [...prev, { ...emptyPrompt }]);
+    setPrompts((prev) => {
+      if (prev.length >= 3) {
+        Alert.alert("Limit reached", "You can add up to 3 prompts.");
+        return prev;
+      }
+      return [...prev, { ...emptyPrompt }];
+    });
   };
 
   const handleRemovePrompt = (index: number) => {
@@ -163,6 +313,11 @@ export default function ProfileScreen() {
   };
 
   const handleAddPhoto = async () => {
+    if (photoDrafts.length >= 6) {
+      Alert.alert("Limit reached", "You can upload up to 6 photos.");
+      return;
+    }
+
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== "granted") {
       Alert.alert("Permission needed", "Allow photo library access to add pictures.");
@@ -175,12 +330,23 @@ export default function ProfileScreen() {
     });
 
     if (!result.canceled && result.assets?.length) {
-      setPhotos((prev) => [...prev, result.assets[0].uri]);
+      const asset = result.assets[0];
+      const id = `local-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      setPhotoDrafts((prev) => [
+        ...prev,
+        {
+          id,
+          uri: asset.uri,
+          fileName: asset.fileName ?? undefined,
+          mimeType: asset.mimeType ?? "image/jpeg",
+          uploaded: false,
+        },
+      ]);
     }
   };
 
-  const handleRemovePhoto = (uri: string) => {
-    setPhotos((prev) => prev.filter((item) => item !== uri));
+  const handleRemovePhoto = (photoId: string) => {
+    setPhotoDrafts((prev) => prev.filter((item) => item.id !== photoId));
   };
 
   if (!auth) {
@@ -192,6 +358,7 @@ export default function ProfileScreen() {
   }
 
   const isHydrating = isLoadingProfile && !profile;
+  const saving = isSavingProfile || isUploadingPhotos;
 
   return (
     <SafeAreaView style={styles.container} edges={["left", "right", "bottom"]}>
@@ -206,11 +373,11 @@ export default function ProfileScreen() {
           contentInsetAdjustmentBehavior="never"
           scrollEventThrottle={16}
         >
-          {/* ---------- Original Header ---------- */}
           <View style={styles.header}>
             <Text style={styles.heading}>Your profile</Text>
             <Text style={styles.subheading}>
-              Share a few highlights so matches know you better.
+              Wingmate requires your name, age (18+), gender, preference, and 4-6
+              photos before you can discover matches.
             </Text>
           </View>
 
@@ -220,7 +387,12 @@ export default function ProfileScreen() {
             </View>
           ) : null}
 
-          {/* ---------- Fields ---------- */}
+          {validationMessage ? (
+            <View style={styles.validationBanner}>
+              <Text style={styles.validationText}>{validationMessage}</Text>
+            </View>
+          ) : null}
+
           <View style={styles.fieldGroup}>
             <Text style={styles.label}>Name</Text>
             <TextInput
@@ -235,12 +407,56 @@ export default function ProfileScreen() {
           <View style={styles.fieldGroup}>
             <Text style={styles.label}>Age</Text>
             <TextInput
-              placeholder="Age (optional)"
+              placeholder="Age"
               value={age}
               onChangeText={setAge}
               keyboardType="number-pad"
               style={styles.input}
             />
+          </View>
+
+          <View style={styles.fieldGroup}>
+            <Text style={styles.label}>Gender</Text>
+            <View style={styles.segmentRow}>
+              {GENDER_OPTIONS.map((option) => {
+                const active = gender === option.value;
+                return (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[styles.segmentButton, active && styles.segmentButtonActive]}
+                    onPress={() => setGender(option.value)}
+                  >
+                    <Text
+                      style={[styles.segmentText, active && styles.segmentTextActive]}
+                    >
+                      {option.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
+          <View style={styles.fieldGroup}>
+            <Text style={styles.label}>I’m interested in</Text>
+            <View style={styles.segmentRow}>
+              {PREFERENCE_OPTIONS.map((option) => {
+                const active = genderPreference === option.value;
+                return (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[styles.segmentButton, active && styles.segmentButtonActive]}
+                    onPress={() => setGenderPreference(option.value)}
+                  >
+                    <Text
+                      style={[styles.segmentText, active && styles.segmentTextActive]}
+                    >
+                      {option.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
 
           <View style={styles.fieldGroup}>
@@ -265,6 +481,27 @@ export default function ProfileScreen() {
               onChangeText={setPersonaSeed}
               multiline
               style={[styles.input, styles.textArea]}
+            />
+          </View>
+
+          <View style={styles.fieldGroup}>
+            <Text style={styles.label}>Height (cm)</Text>
+            <TextInput
+              placeholder="Optional"
+              value={height}
+              onChangeText={setHeight}
+              keyboardType="number-pad"
+              style={styles.input}
+            />
+          </View>
+
+          <View style={styles.fieldGroup}>
+            <Text style={styles.label}>Ethnicity</Text>
+            <TextInput
+              placeholder="Optional"
+              value={ethnicity}
+              onChangeText={setEthnicity}
+              style={styles.input}
             />
           </View>
 
@@ -336,21 +573,26 @@ export default function ProfileScreen() {
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.photoRow}
           >
-            {photos.map((uri) => (
-              <View key={uri} style={styles.photoThumbWrapper}>
-                <Image source={{ uri }} style={styles.photoThumb} />
+            {photoDrafts.map((photo) => (
+              <View key={photo.id} style={styles.photoThumbWrapper}>
+                <Image
+                  source={{ uri: photo.remoteUrl ?? photo.uri }}
+                  style={styles.photoThumb}
+                />
                 <TouchableOpacity
                   style={styles.removePhotoButton}
-                  onPress={() => handleRemovePhoto(uri)}
+                  onPress={() => handleRemovePhoto(photo.id)}
                 >
                   <Text style={styles.removePhotoText}>×</Text>
                 </TouchableOpacity>
               </View>
             ))}
-            <TouchableOpacity style={styles.addPhotoCard} onPress={handleAddPhoto}>
-              <Text style={styles.addPhotoIcon}>＋</Text>
-              <Text style={styles.addPhotoLabel}>Add</Text>
-            </TouchableOpacity>
+            {photoDrafts.length < 6 ? (
+              <TouchableOpacity style={styles.addPhotoCard} onPress={handleAddPhoto}>
+                <Text style={styles.addPhotoIcon}>＋</Text>
+                <Text style={styles.addPhotoLabel}>Add</Text>
+              </TouchableOpacity>
+            ) : null}
           </ScrollView>
 
           <View style={styles.switchRow}>
@@ -365,17 +607,17 @@ export default function ProfileScreen() {
               onValueChange={handleTogglePro}
               trackColor={{ true: "#ff9fb5", false: "#ccc" }}
               thumbColor={(profile?.isPro ?? false) ? "#ff4f81" : "#f4f3f4"}
-              disabled={isSavingProfile}
+              disabled={saving}
             />
           </View>
 
           <TouchableOpacity
-            style={[styles.saveButton, (!hasChanges || isSavingProfile) && styles.saveDisabled]}
+            style={[styles.saveButton, (!hasChanges || saving) && styles.saveDisabled]}
             onPress={handleSave}
-            disabled={!hasChanges || isSavingProfile}
+            disabled={!hasChanges || saving}
           >
             <Text style={styles.saveButtonText}>
-              {isSavingProfile ? "Saving…" : "Save profile"}
+              {saving ? "Saving…" : "Save profile"}
             </Text>
           </TouchableOpacity>
 
@@ -403,6 +645,12 @@ const styles = StyleSheet.create({
     padding: 12,
   },
   errorText: { color: "#c11d4a", fontWeight: "600" },
+  validationBanner: {
+    backgroundColor: "#fff4d6",
+    borderRadius: 12,
+    padding: 12,
+  },
+  validationText: { color: "#8a6000", fontWeight: "600" },
   fieldGroup: { gap: 8 },
   label: { fontSize: 16, fontWeight: "600", color: "#222" },
   fieldHint: { fontSize: 13, color: "#777" },
@@ -441,7 +689,12 @@ const styles = StyleSheet.create({
     backgroundColor: "#fbe3ea",
   },
   removePromptText: { color: "#c11d4a", fontWeight: "600" },
-  photoRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  photoRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 4,
+  },
   photoThumbWrapper: { position: "relative" },
   photoThumb: {
     width: 108,
@@ -478,29 +731,46 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingVertical: 8,
+    gap: 16,
   },
-  switchHint: { color: "#666", marginTop: 4, fontSize: 13 },
+  switchHint: { fontSize: 14, color: "#666", lineHeight: 20 },
   saveButton: {
     backgroundColor: "#ff4f81",
-    borderRadius: 12,
-    paddingVertical: 16,
+    borderRadius: 999,
+    paddingVertical: 14,
     alignItems: "center",
   },
-  saveDisabled: { opacity: 0.6 },
-  saveButtonText: { color: "#fff", fontSize: 17, fontWeight: "600" },
+  saveButtonText: { color: "#fff", fontSize: 16, fontWeight: "600" },
+  saveDisabled: { opacity: 0.5 },
   signOutButton: {
-    borderRadius: 12,
-    paddingVertical: 16,
+    marginTop: 8,
+    paddingVertical: 14,
     alignItems: "center",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#eee",
+    backgroundColor: "#fafafa",
+  },
+  signOutText: { color: "#444", fontSize: 15, fontWeight: "600" },
+  centered: { flex: 1, alignItems: "center", justifyContent: "center" },
+  centeredText: { fontSize: 16, color: "#444" },
+  segmentRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  segmentButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
     borderWidth: 1,
     borderColor: "#ddd",
+    backgroundColor: "#fff",
   },
-  signOutText: { fontSize: 16, color: "#444", fontWeight: "600" },
-  centered: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 24,
+  segmentButtonActive: {
+    backgroundColor: "#ffedf3",
+    borderColor: "#ff4f81",
   },
-  centeredText: { fontSize: 16, color: "#555", textAlign: "center" },
+  segmentText: { color: "#444", fontSize: 14, fontWeight: "500" },
+  segmentTextActive: { color: "#ff4f81" },
 });

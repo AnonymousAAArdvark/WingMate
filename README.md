@@ -67,28 +67,41 @@ create type match_status as enum ('active', 'ended');
 
 create table profiles (
   id uuid primary key references auth.users on delete cascade,
-  display_name text not null default '',
-  age int,
+  display_name text not null,
+  age int not null check (age >= 18),
+  gender text not null check (gender in ('woman', 'man', 'nonbinary', 'other')),
+  gender_preference text not null default 'everyone'
+    check (gender_preference in ('women', 'men', 'everyone')),
+  height_cm int,
+  ethnicity text,
   bio text,
   persona_seed text,
   prompts jsonb not null default '[]',
   hobbies text[] not null default '{}',
-  photo_urls text[] not null default '{}',
+  photo_urls text[] not null,
   is_pro boolean not null default false,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint profiles_photo_count check (cardinality(photo_urls) between 4 and 6)
 );
 
 create table seed_profiles (
   seed_id text primary key,
   display_name text not null,
   age int,
+  gender text not null default 'other'
+    check (gender in ('woman', 'man', 'nonbinary', 'other')),
+  gender_preference text not null default 'everyone'
+    check (gender_preference in ('women', 'men', 'everyone')),
+  height_cm int,
+  ethnicity text,
   bio text,
   persona_seed text,
   prompts jsonb not null default '[]',
   hobbies text[] not null default '{}',
-  photo_url text,
-  is_active boolean not null default true
+  photo_urls text[] not null,
+  is_active boolean not null default true,
+  constraint seed_profiles_photo_count check (cardinality(photo_urls) between 4 and 6)
 );
 
 create table dismissed_seeds (
@@ -104,6 +117,15 @@ create table dismissed_profiles (
   dismissed_at timestamptz not null default now(),
   primary key (user_id, target_user_id)
 );
+
+create table message_read_receipts (
+  match_id uuid references matches(id) on delete cascade,
+  user_id uuid references auth.users on delete cascade,
+  last_read_at timestamptz not null default now(),
+  primary key (match_id, user_id)
+);
+
+create index message_read_receipts_match_idx on message_read_receipts (match_id, user_id);
 
 create table matches (
   id uuid primary key default gen_random_uuid(),
@@ -154,6 +176,14 @@ create policy "owner dismissed profile read" on dismissed_profiles
 create policy "owner dismissed profile write" on dismissed_profiles
   for insert with check (auth.uid() = user_id);
 
+alter table message_read_receipts enable row level security;
+create policy "participant read receipts read" on message_read_receipts
+  for select using (auth.uid() = user_id);
+create policy "participant read receipts write" on message_read_receipts
+  for insert with check (auth.uid() = user_id);
+create policy "participant read receipts update" on message_read_receipts
+  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 alter table matches enable row level security;
 create policy "participant read" on matches
   for select using (auth.uid() = user_a or auth.uid() = user_b);
@@ -177,34 +207,167 @@ create policy "participant write messages" on messages
       where m.id = messages.match_id
         and (m.user_a = auth.uid() or m.user_b = auth.uid()))
   );
+
+create or replace function fetch_match_summaries(viewer_id uuid)
+returns table (
+  id uuid,
+  user_a uuid,
+  user_b uuid,
+  seed_id text,
+  autopilot_enabled boolean,
+  status match_status,
+  created_at timestamptz,
+  updated_at timestamptz,
+  last_message_id uuid,
+  last_message_text text,
+  last_message_at timestamptz,
+  last_message_created_at timestamptz,
+  last_message_sender uuid,
+  last_message_is_seed boolean,
+  unread_count int
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    m.id,
+    m.user_a,
+    m.user_b,
+    m.seed_id,
+    m.autopilot_enabled,
+    m.status,
+    m.created_at,
+    m.updated_at,
+    lm.id as last_message_id,
+    lm.text as last_message_text,
+    lm.created_at as last_message_at,
+    lm.created_at as last_message_created_at,
+    lm.sender_id as last_message_sender,
+    lm.is_seed as last_message_is_seed,
+    coalesce(unread.unread_count, 0)::int as unread_count
+  from matches m
+  left join lateral (
+    select msg.id, msg.text, msg.created_at, msg.sender_id, msg.is_seed
+    from messages msg
+    where msg.match_id = m.id
+    order by msg.created_at desc
+    limit 1
+  ) lm on true
+  left join lateral (
+    select count(*)::bigint as unread_count
+    from messages msg
+    left join message_read_receipts r
+      on r.match_id = msg.match_id and r.user_id = viewer_id
+    where msg.match_id = m.id
+      and msg.sender_id is distinct from viewer_id
+      and (r.last_read_at is null or msg.created_at > r.last_read_at)
+  ) unread on true
+  where viewer_id is not null
+    and (m.user_a = viewer_id or m.user_b = viewer_id)
+  order by coalesce(lm.created_at, m.created_at) desc;
+$$;
+
+grant execute on function fetch_match_summaries(uuid) to authenticated;
 ```
 
 Seed a few demo profiles (edit as desired):
 
 ```sql
-insert into seed_profiles (seed_id, display_name, age, bio, persona_seed, prompts, hobbies, photo_url)
+insert into seed_profiles (
+  seed_id,
+  display_name,
+  age,
+  gender,
+  gender_preference,
+  height_cm,
+  ethnicity,
+  bio,
+  persona_seed,
+  prompts,
+  hobbies,
+  photo_urls,
+  is_active
+)
 values
-  ('seed_ivy',  'Ivy', 24, 'Plant mom, weekend climber, noodle soup evangelist.',
+  (
+    'seed_ivy',
+    'Ivy',
+    24,
+    'woman',
+    'men',
+    167,
+    'Filipina',
+    'Plant mom, weekend climber, noodle soup evangelist.',
     'Bright, warm, outdoorsy; playful plant analogies.',
     '[{"question": "Ideal first date?", "answer": "Coffee in a sunny greenhouse"}]',
-    '{Climbing,Cooking,Houseplants}', 'https://picsum.photos/seed/ivy1/800/1000'),
-  ('seed_kai',  'Kai', 27, 'Triathlete, ramen aficionado, part-time synth nerd.',
+    '{Climbing,Cooking,Houseplants}',
+    array[
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/ivy-1.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/ivy-2.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/ivy-3.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/ivy-4.jpg'
+    ],
+    true
+  ),
+  (
+    'seed_kai',
+    'Kai',
+    27,
+    'man',
+    'women',
+    181,
+    'Japanese American',
+    'Triathlete, ramen aficionado, part-time synth nerd.',
     'Energetic, encouraging, short confident banter.',
     '[{"question": "Perfect weekend?", "answer": "Morning swim, night market"}]',
-    '{Triathlon,Music,Street food}', 'https://picsum.photos/seed/kai1/800/1000'),
-  ('seed_lena', 'Lena',25, 'Design grad, gallery hopper, rainy city walks.',
+    '{Triathlon,Music,Street food}',
+    array[
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/kai-1.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/kai-2.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/kai-3.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/kai-4.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/kai-5.jpg'
+    ],
+    true
+  ),
+  (
+    'seed_lena',
+    'Lena',
+    25,
+    'woman',
+    'everyone',
+    170,
+    'Latina',
+    'Design grad, gallery hopper, rainy city walks.',
     'Soft wit, art references, curious about simple joys.',
     '[{"question": "Comfort show?", "answer": "Bob''s Burgers"}]',
-    '{Art,Coffee,Photography}', 'https://picsum.photos/seed/lena1/800/1000')
-  on conflict (seed_id) do update set
-    display_name = excluded.display_name,
-    age = excluded.age,
-    bio = excluded.bio,
-    persona_seed = excluded.persona_seed,
-    prompts = excluded.prompts,
-    hobbies = excluded.hobbies,
-    photo_url = excluded.photo_url,
-    is_active = true;
+    '{Art,Coffee,Photography}',
+    array[
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/lena-1.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/lena-2.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/lena-3.jpg',
+      'https://<project>.supabase.co/storage/v1/object/public/profile-photos/seeds/lena-4.jpg'
+    ],
+    true
+  )
+on conflict (seed_id) do update set
+  display_name = excluded.display_name,
+  age = excluded.age,
+  gender = excluded.gender,
+  gender_preference = excluded.gender_preference,
+  height_cm = excluded.height_cm,
+  ethnicity = excluded.ethnicity,
+  bio = excluded.bio,
+  persona_seed = excluded.persona_seed,
+  prompts = excluded.prompts,
+  hobbies = excluded.hobbies,
+  photo_urls = excluded.photo_urls,
+  is_active = true;
+
+> 📸 **Storage** – Create a public Supabase Storage bucket named `profile-photos` and upload the seed images (and any human profile
+> photos) there. The URLs above assume the files live in `profile-photos/seeds/*`. Grant `public` read access so the Expo app can
+> fetch the images without an authenticated storage token.
 ```
 
 > ❗️ Supabase Auth: disable "Email Confirmations" for password sign-ups (Authentication → Providers → Email) or users will have to verify before receiving a session.
@@ -304,7 +467,7 @@ The mobile client now listens on a realtime channel for `messages` inserts, so r
 
 4. **Test flow**
    - Sign up with an email + password → profile row is upserted automatically.
-   - Build your profile, then head to Discover, Like a seed, open the chat.
+   - Build your profile (name, age ≥ 18, gender, preference, 4–6 hosted photos) then head to Discover, Like a seed, open the chat.
    - Enable “Wingmate Autopilot” in Profile to unlock auto-drafted openers and follow ups.
 
 > Note: `npm install` cannot run in this environment because outbound network calls are blocked. Install dependencies on your machine before running `tsc`/`expo`.
@@ -316,6 +479,7 @@ The mobile client now listens on a realtime channel for `messages` inserts, so r
 1. **Supabase**
    - Apply the schema & policies above.
    - Add seed data (or build an admin UI).
+   - Create a **public** storage bucket named `profile-photos` and upload at least 4 images per seed (and any onboarding defaults).
 2. **Vercel**
    - Set project env vars `OPENAI_API_KEY`, `OPENAI_MODEL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
    - Deploy with `npx vercel --prod`.
@@ -334,7 +498,8 @@ The mobile client now listens on a realtime channel for `messages` inserts, so r
   - Added `autopilotDraft` mode for Pro users to get message drafts without mutating the conversation.
 - Refactored Zustand stores to hydrate from Supabase (`useAuth`, `useProfile`, `useMatches`).
 - Discover deck now queries live seed profiles, persists dismissals/matches, and performs a remote “Reset deck”.
-- Matches & chat screens hydrate from Supabase, including autopilot toggles, message polling, and Pro gating.
+- Discover stays locked until the profile validator confirms name, age, gender, preference, and 4–6 hosted photos are set (uploads stream through the `profile-photos` bucket).
+- Matches & chat screens hydrate from Supabase, including autopilot toggles, message polling, unread counters backed by `message_read_receipts`, and Pro gating.
 - Added onboarding instructions + schema SQL to this README for quick reprovisioning.
 
 ---

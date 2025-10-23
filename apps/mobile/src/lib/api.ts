@@ -3,9 +3,14 @@ export const BASE_URL =
 
 type ProfileSummary = {
   name?: string;
+  age?: number;
+  gender?: string;
+  genderPreference?: string;
   bio?: string;
   prompts?: { question: string; answer: string }[];
   hobbies?: string[];
+  heightCm?: number;
+  ethnicity?: string;
 };
 
 type AutopilotDraftRequest = {

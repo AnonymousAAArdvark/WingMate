@@ -107,7 +107,7 @@ export default function ChatScreen() {
 
   useEffect(() => {
     if (!user?.id) return;
-    loadMessages(matchId);
+    loadMessages(matchId, user.id);
   }, [loadMessages, matchId, user?.id]);
 
   useEffect(() => {
@@ -185,7 +185,7 @@ export default function ChatScreen() {
         (payload: any) => {
           const newMsg = payload.new as { sender_id: string | null; is_seed: boolean | null };
           const senderId = newMsg.sender_id;
-          loadMessages(matchId);
+          loadMessages(matchId, user.id);
 
           if ((partnerUserId && senderId === partnerUserId) || (!partnerUserId && newMsg.is_seed)) {
             setIsTypingPartner(false);
@@ -240,16 +240,26 @@ export default function ChatScreen() {
         })),
         userProfile: {
           name: profile?.name,
+          age: profile?.age,
+          gender: profile?.gender,
+          genderPreference: profile?.genderPreference,
           bio: profile?.bio,
           prompts: profile?.prompts,
           hobbies: profile?.hobbies,
+          heightCm: profile?.heightCm,
+          ethnicity: profile?.ethnicity,
         },
         counterpartProfile: partner
           ? {
               name: partner.name,
+              age: partner.age,
+              gender: partner.gender,
+              genderPreference: partner.genderPreference,
               bio: partner.bio,
               prompts: partner.prompts,
               hobbies: partner.hobbies,
+              heightCm: partner.heightCm,
+              ethnicity: partner.ethnicity,
             }
           : undefined,
       });

@@ -27,7 +27,8 @@ export default function RootLayout() {
       <Stack.Screen
         name="profile/[profileId]"
         options={{
-          headerShown: true,
+          // IMPORTANT: hide the native header to prevent double headers.
+          headerShown: false,
           title: "Profile",
           presentation: "modal",
         }}

@@ -2,6 +2,10 @@ import { create } from "zustand";
 import { supabase } from "../lib/supabase";
 import type { Profile } from "../lib/types";
 import { mapProfileRow } from "../lib/mappers";
+import {
+  formatProfileValidation,
+  validateProfile,
+} from "../lib/profileValidation";
 
 type ProfileState = {
   profile?: Profile;
@@ -25,7 +29,7 @@ export const useProfile = create<ProfileState>((set) => ({
       const { data, error } = await supabase
         .from("profiles")
         .select(
-          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
+          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity, is_pro",
         )
         .eq("id", userId)
         .maybeSingle();
@@ -40,8 +44,16 @@ export const useProfile = create<ProfileState>((set) => ({
     }
   },
   save: async (profile) => {
+    const { data: authData } = await supabase.auth.getSession();
+    const sessionUserId = authData.session?.user?.id;
+    if (!sessionUserId) {
+      const message = "Sign in to update your profile.";
+      set({ error: message });
+      throw new Error(message);
+    }
+
     const payload = {
-      id: profile.userId,
+      id: sessionUserId,
       display_name: profile.name,
       age: profile.age ?? null,
       bio: profile.bio,
@@ -49,16 +61,26 @@ export const useProfile = create<ProfileState>((set) => ({
       prompts: profile.prompts,
       hobbies: profile.hobbies,
       photo_urls: profile.photoURIs,
+      gender: profile.gender,
+      gender_preference: profile.genderPreference,
+      height_cm: profile.heightCm ?? null,
+      ethnicity: profile.ethnicity ?? null,
       is_pro: profile.isPro,
     };
 
     set({ isSaving: true, error: undefined });
     try {
+      const validation = validateProfile(profile);
+      if (!validation.isComplete) {
+        const message = formatProfileValidation(validation) || "Profile is incomplete.";
+        throw new Error(message);
+      }
+
       const { data, error } = await supabase
         .from("profiles")
         .upsert(payload)
         .select(
-          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
+          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity, is_pro",
         )
         .maybeSingle();
 
@@ -76,15 +98,23 @@ export const useProfile = create<ProfileState>((set) => ({
       set({ isSaving: false });
     }
   },
-  setPro: async (userId, value) => {
+  setPro: async (_userId, value) => {
+    const { data: authData } = await supabase.auth.getSession();
+    const sessionUserId = authData.session?.user?.id;
+    if (!sessionUserId) {
+      const message = "Sign in to update your plan.";
+      set({ error: message });
+      throw new Error(message);
+    }
+
     set({ isSaving: true, error: undefined });
     try {
       const { data, error } = await supabase
         .from("profiles")
         .update({ is_pro: value })
-        .eq("id", userId)
+        .eq("id", sessionUserId)
         .select(
-          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, is_pro",
+          "id, display_name, age, bio, persona_seed, prompts, hobbies, photo_urls, gender, gender_preference, height_cm, ethnicity, is_pro",
         )
         .maybeSingle();
 
